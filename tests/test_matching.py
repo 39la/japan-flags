@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import unittest
 
-from japan_flags.matching import match_commons_files_to_municipalities
-from japan_flags.national_matching import _choose_primary_flags
+from japan_flags.matching import (
+    choose_primary_flags,
+    match_commons_files_to_municipalities,
+)
 
 
 class MatchingTest(unittest.TestCase):
@@ -366,7 +368,7 @@ class MatchingTest(unittest.TestCase):
                 "method": "wikidata_p429_item_usage",
             },
         ]
-        _choose_primary_flags(matches)
+        choose_primary_flags(matches)
         primary = next(match for match in matches if match["is_primary"])
         self.assertEqual(primary["page_id"], 11)
 

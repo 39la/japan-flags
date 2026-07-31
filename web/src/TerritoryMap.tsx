@@ -8,11 +8,16 @@ import {
   type WheelEvent,
 } from "react";
 import { fitCanvasViewport, viewportPointToContent } from "./canvas-viewport";
-import { getFlagFitStrategy, placeMotif } from "./flag-fit";
 import {
-  cachedFlagRaster,
-  cachedFlagSvg,
-  cachedPrefectureSpriteAtlas,
+  createSceneCache,
+  drawCachedScene,
+  drawMapOverlay,
+  drawRenderPlanFeatures,
+  drawSceneBoundaries,
+  resizeVisibleCanvases,
+  type SceneCache,
+} from "./canvas-renderer";
+import {
   loadSpriteAtlas,
   prefetchFlagResources,
   preloadPrefectureSpriteAtlas,
@@ -26,16 +31,16 @@ import {
   type MotifRenderSettings,
 } from "./flag-visuals";
 import { ResetIcon } from "./icons";
-import { exportCamera, type MapExportRequest } from "./map-export";
-import { useCompiledMapScene, type RenderedBoundary, type RenderedFeature } from "./map-geometry";
-import { MAP_HEIGHT, MAP_WIDTH, focusBounds } from "./map-model";
 import {
-  buildFlagResourceIntent,
-  buildRenderPlan,
-  featureKey,
-  isVisible,
-  prefectureCode,
-} from "./render-plan";
+  focusFeatureCamera,
+  nationalView,
+  sceneCacheContainsViewport,
+  zoomCamera,
+} from "./map-camera";
+import { exportCamera, type MapExportRequest } from "./map-export";
+import { useCompiledMapScene } from "./map-geometry";
+import { MAP_HEIGHT, MAP_WIDTH } from "./map-model";
+import { buildRenderPlan, featureKey, isVisible, prefectureCode } from "./render-plan";
 import { geometryLodForRenderScale, physicalRenderScale, type GeometryLod } from "./render-scale";
 import { buildMapSvg } from "./svg-renderer";
 import type { FlagFitMode, MapDisplayOptions, MapFeature, MapLayer, ViewTransform } from "./types";
@@ -72,72 +77,11 @@ type DragState = {
   origin: ViewTransform;
 };
 
-type SceneCache = {
-  canvas: HTMLCanvasElement;
-  camera: ViewTransform;
-  marginX: number;
-  marginY: number;
-  logicalWidth: number;
-  logicalHeight: number;
-  visiblePixelWidth: number;
-  visiblePixelHeight: number;
-  sceneGeneration: number;
-  resourceRevision: number;
-  layer: MapLayer;
-  fitMode: FlagFitMode;
-  focusedPrefecture: string | null;
-  motifSettingsSignature: string;
-};
-
-const NATIONAL_ZOOM = 1.08;
-const nationalView: ViewTransform = {
-  x: MAP_WIDTH / 2 - (NATIONAL_ZOOM * MAP_WIDTH) / 2,
-  y: MAP_HEIGHT / 2 - (NATIONAL_ZOOM * MAP_HEIGHT) / 2,
-  k: NATIONAL_ZOOM,
-};
 const SCENE_OVERSCAN = 1.6;
 const CAMERA_SETTLE_MS = 120;
 const MAX_SCENE_PIXEL_RATIO = 1.5;
-const MAX_CAMERA_ZOOM = 24;
 const DETAIL_PREFETCH_MARGIN = 160;
 const EMPTY_BOUNDARY_FEATURES: MapFeature[] = [];
-
-export function sceneCacheContainsViewport(
-  cache: Pick<
-    SceneCache,
-    "camera" | "marginX" | "marginY" | "visiblePixelWidth" | "visiblePixelHeight"
-  >,
-  camera: ViewTransform,
-  visiblePixelWidth: number,
-  visiblePixelHeight: number,
-) {
-  if (
-    camera.k !== cache.camera.k ||
-    visiblePixelWidth !== cache.visiblePixelWidth ||
-    visiblePixelHeight !== cache.visiblePixelHeight
-  ) {
-    return false;
-  }
-  const oldScreenOffsetX = cache.camera.x - camera.x;
-  const oldScreenOffsetY = cache.camera.y - camera.y;
-  return (
-    oldScreenOffsetX >= -cache.marginX &&
-    oldScreenOffsetX <= cache.marginX &&
-    oldScreenOffsetY >= -cache.marginY &&
-    oldScreenOffsetY <= cache.marginY
-  );
-}
-
-function featureIsSelected(feature: MapFeature, selected: MapFeature | null) {
-  if (!selected) return false;
-  if (
-    feature.properties.entityType === "prefecture" &&
-    selected.properties.entityType === "prefecture"
-  ) {
-    return feature.properties.prefectureCode === selected.properties.prefectureCode;
-  }
-  return featureKey(feature) === featureKey(selected);
-}
 
 function canvasPoint(canvas: HTMLCanvasElement, clientX: number, clientY: number) {
   const rect = canvas.getBoundingClientRect();
@@ -146,43 +90,6 @@ function canvasPoint(canvas: HTMLCanvasElement, clientX: number, clientY: number
     clientX - rect.left,
     clientY - rect.top,
   );
-}
-
-function strokeBoundaryLayer(
-  context: CanvasRenderingContext2D,
-  boundaries: RenderedBoundary[],
-  camera: ViewTransform,
-  strokeStyle: string,
-  lineWidth: number,
-) {
-  context.strokeStyle = strokeStyle;
-  context.lineWidth = lineWidth / camera.k;
-  context.lineJoin = "round";
-  context.lineCap = "round";
-  for (const boundary of boundaries) {
-    if (!boundary.canvasPaths.length || !isVisible(boundary.bounds, camera)) continue;
-    for (const path of boundary.canvasPaths) context.stroke(path);
-  }
-}
-
-export function focusFeatureCamera(
-  renderedFeatures: RenderedFeature[],
-  selected: MapFeature,
-  layer: MapLayer,
-) {
-  const matches = renderedFeatures.filter((item) => featureIsSelected(item.feature, selected));
-  if (!matches.length) return null;
-  const bounds = matches.reduce<[[number, number], [number, number]]>(
-    (current, item) => [
-      [Math.min(current[0][0], item.bounds[0][0]), Math.min(current[0][1], item.bounds[0][1])],
-      [Math.max(current[1][0], item.bounds[1][0]), Math.max(current[1][1], item.bounds[1][1])],
-    ],
-    [
-      [Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY],
-      [Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY],
-    ],
-  );
-  return focusBounds(bounds, layer === "prefecture" ? 8 : 14, layer === "prefecture" ? 0.55 : 0.42);
 }
 
 export function TerritoryMap({
@@ -209,7 +116,6 @@ export function TerritoryMap({
     renderedFeatures,
     renderedBoundaries,
     generation: sceneGeneration,
-    metricsRef: sceneMetricsRef,
     projection,
     ready: compiledSceneReady,
   } = useCompiledMapScene(features, layer);
@@ -271,28 +177,17 @@ export function TerritoryMap({
   const resourceRevisionRef = useRef(0);
   const resourceBatchPendingRef = useRef(false);
   const resourceIntentSignatureRef = useRef("");
-  const resourceIntentAtRef = useRef(0);
   const motifSettingsSignature = JSON.stringify(motifSettings);
 
   useEffect(() => {
     const hitCanvas = document.createElement("canvas");
     hitContextRef.current = hitCanvas.getContext("2d");
-    sceneCacheRef.current = {
-      canvas: document.createElement("canvas"),
-      camera: { ...nationalView },
-      marginX: 0,
-      marginY: 0,
-      logicalWidth: MAP_WIDTH,
-      logicalHeight: MAP_HEIGHT,
-      visiblePixelWidth: 0,
-      visiblePixelHeight: 0,
-      sceneGeneration: 0,
-      resourceRevision: -1,
+    sceneCacheRef.current = createSceneCache(
       layer,
       fitMode,
       focusedPrefecture,
       motifSettingsSignature,
-    };
+    );
     return () => {
       if (cameraFrameRef.current !== null) {
         window.cancelAnimationFrame(cameraFrameRef.current);
@@ -430,7 +325,7 @@ export function TerritoryMap({
       visiblePrefectureSignature.current = signature;
       onVisiblePrefecturesChange(codes);
     },
-    [renderedFeatures, layer, onVisiblePrefecturesChange],
+    [renderedFeatures, onVisiblePrefecturesChange],
   );
 
   const renderVectorScene = useCallback(
@@ -456,39 +351,6 @@ export function TerritoryMap({
       }
       const context = cache.canvas.getContext("2d");
       if (!context) return false;
-      if (import.meta.env.DEV) {
-        visibleCanvas.dataset.vectorRenders = String(
-          Number(visibleCanvas.dataset.vectorRenders ?? 0) + 1,
-        );
-        visibleCanvas.dataset.camera = JSON.stringify(camera);
-        visibleCanvas.dataset.geometryCompiles = String(
-          sceneMetricsRef.current.featureCompilationCount,
-        );
-        visibleCanvas.dataset.geometryCompileMaxSliceMs =
-          sceneMetricsRef.current.maxSliceMs.toFixed(1);
-        visibleCanvas.dataset.geometryCompileYields = String(sceneMetricsRef.current.yieldCount);
-        visibleCanvas.dataset.boundaryCompiles = String(
-          sceneMetricsRef.current.boundaryCompilationCount,
-        );
-        visibleCanvas.dataset.boundaryCompileMaxSliceMs =
-          sceneMetricsRef.current.maxSliceMs.toFixed(1);
-        visibleCanvas.dataset.boundaryCompileYields = String(sceneMetricsRef.current.yieldCount);
-        visibleCanvas.dataset.boundaryPoints = String(sceneMetricsRef.current.boundaryPointCount);
-        visibleCanvas.dataset.sceneCommits = String(sceneMetricsRef.current.sceneCommitCount);
-        visibleCanvas.dataset.boundaryCacheHits = String(
-          sceneMetricsRef.current.boundaryCacheHitCount,
-        );
-        visibleCanvas.dataset.resourceIntentLeadMs =
-          resourceIntentAtRef.current > 0
-            ? Math.max(0, performance.now() - resourceIntentAtRef.current).toFixed(1)
-            : "0.0";
-        visibleCanvas.dataset.boundaryCurrentPoints = String(
-          renderedBoundaries.reduce((total, boundary) => total + boundary.pointCount, 0),
-        );
-        visibleCanvas.dataset.boundaryPathBatches = String(
-          renderedBoundaries.reduce((total, boundary) => total + boundary.canvasPaths.length, 0),
-        );
-      }
       context.setTransform(1, 0, 0, 1, 0, 0);
       context.clearRect(0, 0, targetWidth, targetHeight);
       context.setTransform(
@@ -540,156 +402,8 @@ export function TerritoryMap({
         });
       }
 
-      const strategy = getFlagFitStrategy(fitMode === "motif" ? "cover" : fitMode);
-      for (const planned of plan.features) {
-        const {
-          item,
-          hasFlag,
-          resourcePath,
-          visual,
-          motifPlacement,
-          rasterBucket: bucket,
-          useDirectSvg,
-        } = planned;
-        const path = item.canvasPath;
-        const properties = item.feature.properties;
-        const separated =
-          fitMode === "motif" && visual?.kind === "separated" && motifPlacement !== null;
-        const showFlag = hasFlag && resourcePath && bucket;
-        context.fillStyle =
-          separated && visual.background.kind === "solid"
-            ? visual.background.color
-            : hasFlag
-              ? "#ffffff"
-              : "#edf0f2";
-        context.fill(path);
-
-        if (separated && visual.background.kind === "asset") {
-          const background = cachedFlagSvg(visual.background.path);
-          if (background) {
-            const placement = getFlagFitStrategy("cover").place(
-              background.width,
-              background.height,
-              item.bounds,
-            );
-            context.save();
-            context.clip(path);
-            context.drawImage(
-              background.image,
-              placement.x,
-              placement.y,
-              placement.width,
-              placement.height,
-            );
-            context.restore();
-          }
-        }
-
-        if (showFlag && resourcePath && bucket) {
-          const svg = useDirectSvg ? cachedFlagSvg(resourcePath) : null;
-          const raster = cachedFlagRaster(resourcePath, bucket);
-          if (svg) {
-            const placement =
-              separated && motifPlacement
-                ? placeMotif(
-                    svg.width,
-                    svg.height,
-                    item.bounds,
-                    properties.visualAnchor,
-                    properties.visualSafeRadiusRatio,
-                    motifPlacement,
-                    properties.visualCentroidAnchor,
-                    properties.visualOptimizedAnchor,
-                    properties.visualComponentBounds,
-                  )
-                : strategy.place(svg.width, svg.height, item.bounds);
-            context.save();
-            context.clip(path);
-            context.imageSmoothingEnabled = true;
-            context.imageSmoothingQuality = "high";
-            context.drawImage(
-              svg.image,
-              placement.x,
-              placement.y,
-              placement.width,
-              placement.height,
-            );
-            context.restore();
-          } else if (raster) {
-            const placement =
-              separated && motifPlacement
-                ? placeMotif(
-                    raster.width,
-                    raster.height,
-                    item.bounds,
-                    properties.visualAnchor,
-                    properties.visualSafeRadiusRatio,
-                    motifPlacement,
-                    properties.visualCentroidAnchor,
-                    properties.visualOptimizedAnchor,
-                    properties.visualComponentBounds,
-                  )
-                : strategy.place(raster.width, raster.height, item.bounds);
-            context.save();
-            context.clip(path);
-            context.drawImage(
-              raster.bitmap,
-              placement.x,
-              placement.y,
-              placement.width,
-              placement.height,
-            );
-            context.restore();
-          } else {
-            const prefectureAtlas =
-              bucket === 64 ? cachedPrefectureSpriteAtlas(prefectureCode(item.feature)) : null;
-            const atlas = prefectureAtlas?.sprites[resourcePath] ? prefectureAtlas : spriteAtlas;
-            const sprite = atlas?.sprites[resourcePath];
-            if (sprite && atlas) {
-              const placement =
-                separated && motifPlacement
-                  ? placeMotif(
-                      sprite.width,
-                      sprite.height,
-                      item.bounds,
-                      properties.visualAnchor,
-                      properties.visualSafeRadiusRatio,
-                      motifPlacement,
-                      properties.visualCentroidAnchor,
-                      properties.visualOptimizedAnchor,
-                      properties.visualComponentBounds,
-                    )
-                  : strategy.place(sprite.width, sprite.height, item.bounds);
-              context.save();
-              context.clip(path);
-              context.imageSmoothingEnabled = true;
-              context.imageSmoothingQuality = "high";
-              context.drawImage(
-                atlas.image,
-                sprite.x,
-                sprite.y,
-                sprite.width,
-                sprite.height,
-                placement.x,
-                placement.y,
-                placement.width,
-                placement.height,
-              );
-              context.restore();
-            }
-          }
-        }
-      }
-
-      context.strokeStyle = "#aeb6bc";
-      context.lineWidth = 0.62 / camera.k;
-      for (const boundary of renderedBoundaries) {
-        if (boundary.canvasPaths.length && isVisible(boundary.bounds, camera, marginX, marginY)) {
-          for (const path of boundary.canvasPaths) {
-            context.stroke(path);
-          }
-        }
-      }
+      drawRenderPlanFeatures(context, plan, fitMode, spriteAtlas);
+      drawSceneBoundaries(context, renderedBoundaries, camera, marginX, marginY);
 
       cache.camera = { ...camera };
       cache.marginX = marginX;
@@ -724,23 +438,7 @@ export function TerritoryMap({
   );
 
   const ensureVisibleCanvasSizes = useCallback(() => {
-    const base = baseCanvasRef.current;
-    const overlay = overlayCanvasRef.current;
-    if (!base || !overlay) return false;
-    const width = Math.max(1, base.clientWidth);
-    const height = Math.max(1, base.clientHeight);
-    const ratio = Math.min(window.devicePixelRatio || 1, 2);
-    const targetWidth = Math.round(width * ratio);
-    const targetHeight = Math.round(height * ratio);
-    let resized = false;
-    for (const canvas of [base, overlay]) {
-      if (canvas.width !== targetWidth || canvas.height !== targetHeight) {
-        canvas.width = targetWidth;
-        canvas.height = targetHeight;
-        resized = true;
-      }
-    }
-    return resized;
+    return resizeVisibleCanvases(baseCanvasRef.current, overlayCanvasRef.current);
   }, []);
 
   const drawCachedBase = useCallback(() => {
@@ -748,31 +446,7 @@ export function TerritoryMap({
     const cache = sceneCacheRef.current;
     if (!canvas || !cache || !cache.canvas.width) return;
     ensureVisibleCanvasSizes();
-    const context = canvas.getContext("2d");
-    if (!context) return;
-    if (import.meta.env.DEV) {
-      canvas.dataset.cachedFrames = String(Number(canvas.dataset.cachedFrames ?? 0) + 1);
-    }
-    const camera = cameraRef.current;
-    const cameraScale = camera.k / cache.camera.k;
-    const translateX = camera.x - cameraScale * cache.camera.x;
-    const translateY = camera.y - cameraScale * cache.camera.y;
-    const viewport = fitCanvasViewport(canvas.width, canvas.height, MAP_WIDTH, MAP_HEIGHT);
-
-    context.setTransform(1, 0, 0, 1, 0, 0);
-    context.clearRect(0, 0, canvas.width, canvas.height);
-    context.setTransform(viewport.scale, 0, 0, viewport.scale, viewport.offsetX, viewport.offsetY);
-    context.translate(translateX, translateY);
-    context.scale(cameraScale, cameraScale);
-    context.imageSmoothingEnabled = true;
-    context.imageSmoothingQuality = "high";
-    context.drawImage(
-      cache.canvas,
-      -cache.marginX,
-      -cache.marginY,
-      cache.logicalWidth,
-      cache.logicalHeight,
-    );
+    drawCachedScene(canvas, cache, cameraRef.current);
   }, [ensureVisibleCanvasSizes]);
   drawCachedBaseRef.current = drawCachedBase;
 
@@ -780,41 +454,17 @@ export function TerritoryMap({
     const canvas = overlayCanvasRef.current;
     if (!canvas || typeof Path2D === "undefined") return;
     ensureVisibleCanvasSizes();
-    const context = canvas.getContext("2d");
-    if (!context) return;
-    const camera = cameraRef.current;
-    const viewport = fitCanvasViewport(canvas.width, canvas.height, MAP_WIDTH, MAP_HEIGHT);
-    context.setTransform(1, 0, 0, 1, 0, 0);
-    context.clearRect(0, 0, canvas.width, canvas.height);
-    context.setTransform(viewport.scale, 0, 0, viewport.scale, viewport.offsetX, viewport.offsetY);
-    context.translate(camera.x, camera.y);
-    context.scale(camera.k, camera.k);
-
-    if (layer === "municipality" && displayOptions.showPrefectureBoundaries) {
-      strokeBoundaryLayer(context, prefectureOverlayBoundaries, camera, "#6f7980", 1.18);
-    }
-    if (
-      layer === "prefecture" &&
-      displayOptions.showMunicipalityBoundariesOnPrefectureHover &&
-      hovered
-    ) {
-      strokeBoundaryLayer(context, municipalityHoverBoundaries, camera, "#68737a", 0.72);
-    }
-
-    for (const item of renderedFeatures) {
-      const selectedFeature = featureIsSelected(item.feature, selected);
-      const hoveredFeature = hovered && featureKey(item.feature) === featureKey(hovered);
-      if (
-        (!selectedFeature && !hoveredFeature) ||
-        !item.canvasPath ||
-        !isVisible(item.bounds, camera)
-      ) {
-        continue;
-      }
-      context.strokeStyle = selectedFeature ? "#d3261d" : "#202326";
-      context.lineWidth = (selectedFeature ? 3 : 1.4) / camera.k;
-      context.stroke(item.canvasPath);
-    }
+    drawMapOverlay({
+      canvas,
+      camera: cameraRef.current,
+      layer,
+      displayOptions,
+      hovered,
+      selected,
+      renderedFeatures,
+      prefectureBoundaries: prefectureOverlayBoundaries,
+      municipalityBoundaries: municipalityHoverBoundaries,
+    });
   }, [
     displayOptions.showMunicipalityBoundariesOnPrefectureHover,
     displayOptions.showPrefectureBoundaries,
@@ -879,10 +529,6 @@ export function TerritoryMap({
   const renderSettled = useCallback(() => {
     const camera = cameraRef.current;
     if (canReuseCachedScene(camera)) {
-      const canvas = baseCanvasRef.current;
-      if (canvas && import.meta.env.DEV) {
-        canvas.dataset.overscanHits = String(Number(canvas.dataset.overscanHits ?? 0) + 1);
-      }
       drawCachedBase();
       drawOverlayRef.current();
       updateVisiblePrefectures(camera);
@@ -929,7 +575,7 @@ export function TerritoryMap({
         MAP_WIDTH,
         MAP_HEIGHT,
       );
-      const intent = buildFlagResourceIntent({
+      const plan = buildRenderPlan({
         items: renderedFeatures,
         camera,
         renderScale: physicalRenderScale(viewport.scale, camera.k),
@@ -940,11 +586,10 @@ export function TerritoryMap({
         flagVisualManifest,
         motifSettings,
       });
-      if (intent.signature === resourceIntentSignatureRef.current) return;
-      resourceIntentSignatureRef.current = intent.signature;
-      resourceIntentAtRef.current = performance.now();
-      void prefetchFlagResources(intent.rasterRequests, intent.svgRequests);
-      for (const code of intent.prefectureAtlasRequests) {
+      if (plan.resourceSignature === resourceIntentSignatureRef.current) return;
+      resourceIntentSignatureRef.current = plan.resourceSignature;
+      void prefetchFlagResources(plan.rasterRequests, plan.svgRequests);
+      for (const code of plan.prefectureAtlasRequests) {
         void preloadPrefectureSpriteAtlas(code);
       }
     },
@@ -1016,13 +661,7 @@ export function TerritoryMap({
   }, []);
 
   const zoom = (factor: number) => {
-    const current = cameraRef.current;
-    const k = Math.max(NATIONAL_ZOOM, Math.min(MAX_CAMERA_ZOOM, current.k * factor));
-    setCamera({
-      k,
-      x: MAP_WIDTH / 2 - (k / current.k) * (MAP_WIDTH / 2 - current.x),
-      y: MAP_HEIGHT / 2 - (k / current.k) * (MAP_HEIGHT / 2 - current.y),
-    });
+    setCamera(zoomCamera(cameraRef.current, factor));
   };
 
   const hitTest = (clientX: number, clientY: number) => {

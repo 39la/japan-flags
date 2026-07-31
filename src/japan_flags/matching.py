@@ -6,6 +6,24 @@ from typing import Any
 from urllib.parse import unquote
 
 
+def choose_primary_flags(matches: list[dict[str, Any]]) -> None:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for match in matches:
+        grouped.setdefault(match["jis5"], []).append(match)
+    for group in grouped.values():
+        preferred = min(
+            group,
+            key=lambda match: (
+                match["method"] == "parent_city_flag_inheritance",
+                "(" in match["title"],
+                match["title"].lower(),
+                match["page_id"],
+            ),
+        )
+        for match in group:
+            match["is_primary"] = match is preferred
+
+
 def _normalize_article_title(title: str) -> str:
     return unicodedata.normalize("NFKC", unquote(title).replace("_", " ")).strip()
 

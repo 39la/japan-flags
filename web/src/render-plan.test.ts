@@ -101,6 +101,7 @@ describe("buildRenderPlan", () => {
     expect(result.rasterRequests).toEqual([]);
     expect(result.svgRequests).toEqual([]);
     expect(result.prefectureAtlasRequests).toEqual([]);
+    expect(result.resourceSignature).toBe("||");
   });
 
   it("selects flag resolution from the fitted placement, not the polygon bbox", () => {
@@ -161,6 +162,7 @@ describe("buildRenderPlan", () => {
       },
     ]);
     expect(result.svgRequests).toEqual(["/flags/1.svg"]);
+    expect(result.resourceSignature).toBe("/flags/1.svg@256|/flags/1.svg|");
   });
 
   it("uses the separated motif resource only in motif mode", () => {

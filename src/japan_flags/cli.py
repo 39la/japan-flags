@@ -8,6 +8,7 @@ from typing import Any
 
 from .bulk_svg import DEFAULT_ROOT, acquire_all_svg
 from .classification import classify_manifest_file
+from .cli_context import CliContext, print_json
 from .commons import acquire_commons_data
 from .database import (
     build_report,
@@ -16,10 +17,13 @@ from .database import (
     ingest_matches,
     ingest_n03,
     ingest_flag_asset_manifest,
-    open_database,
     start_run,
 )
-from .matching import enwiki_titles, match_commons_files_to_municipalities
+from .matching import (
+    choose_primary_flags,
+    enwiki_titles,
+    match_commons_files_to_municipalities,
+)
 from .n03 import acquire_n03_data
 from .http import polite_delay
 from .national_matching import match_current_flags_nationally
@@ -31,24 +35,6 @@ from .web_export import (
 )
 from .wikidata import fetch_wikidata_codes_for_enwiki_titles
 from .wikipedia_lists import ingest_wikipedia_lists
-
-
-def _choose_primary_flags(matches: list[dict[str, Any]]) -> None:
-    grouped: dict[str, list[dict[str, Any]]] = {}
-    for match in matches:
-        grouped.setdefault(match["jis5"], []).append(match)
-    for group in grouped.values():
-        preferred = sorted(
-            group,
-            key=lambda match: (
-                match["method"] == "parent_city_flag_inheritance",
-                "(" in match["title"],
-                match["title"].lower(),
-                match["page_id"],
-            ),
-        )[0]
-        for match in group:
-            match["is_primary"] = match is preferred
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -142,14 +128,10 @@ def _parser() -> argparse.ArgumentParser:
 
 def _ingest(arguments: argparse.Namespace) -> None:
     prefecture_code = arguments.prefecture_code.zfill(2)
-    data_directory = arguments.data_dir.resolve()
-    database_path = (
-        arguments.database.resolve()
-        if arguments.database
-        else data_directory / "japan-flags.sqlite"
-    )
-    data_directory.mkdir(parents=True, exist_ok=True)
-    connection = open_database(database_path)
+    context = CliContext.from_arguments(arguments, create_data_directory=True)
+    data_directory = context.data_directory
+    database_path = context.database_path
+    connection = context.open_connection()
     parameters = {
         "prefecture_code": prefecture_code,
         "prefecture_name": arguments.prefecture_name,
@@ -204,7 +186,7 @@ def _ingest(arguments: argparse.Namespace) -> None:
                 flag_target_areas,
                 enwiki_codes=enwiki_codes,
             )
-        _choose_primary_flags(matching["matches"])
+        choose_primary_flags(matching["matches"])
         ingest_matches(
             connection,
             matching["matches"],
@@ -247,7 +229,7 @@ def _ingest(arguments: argparse.Namespace) -> None:
             json.dumps(report, ensure_ascii=False, indent=2) + "\n"
         )
         finish_run(connection, run_id, "completed", report)
-        print(json.dumps(report, ensure_ascii=False, indent=2))
+        print_json(report)
     except Exception as error:
         finish_run(
             connection,
@@ -261,19 +243,14 @@ def _ingest(arguments: argparse.Namespace) -> None:
 
 
 def _report(arguments: argparse.Namespace) -> None:
-    data_directory = arguments.data_dir.resolve()
-    database_path = (
-        arguments.database.resolve()
-        if arguments.database
-        else data_directory / "japan-flags.sqlite"
-    )
-    connection = open_database(database_path)
+    context = CliContext.from_arguments(arguments)
+    connection = context.open_connection()
     try:
         report: dict[str, Any] = build_report(
             connection,
             arguments.prefecture_code,
         )
-        print(json.dumps(report, ensure_ascii=False, indent=2))
+        print_json(report)
     finally:
         connection.close()
 
@@ -281,7 +258,7 @@ def _report(arguments: argparse.Namespace) -> None:
 def _fetch_svg_all(arguments: argparse.Namespace) -> None:
     if not 1 <= arguments.workers <= 16:
         raise ValueError("--workers must be between 1 and 16")
-    data_directory = arguments.data_dir.resolve()
+    data_directory = CliContext.from_arguments(arguments).data_directory
     result = acquire_all_svg(
         root_category=arguments.root_category,
         raw_directory=data_directory / "raw" / "commons",
@@ -289,16 +266,13 @@ def _fetch_svg_all(arguments: argparse.Namespace) -> None:
         workers=arguments.workers,
         refresh=arguments.refresh,
     )
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    print_json(result)
 
 
 def _classify_svg(arguments: argparse.Namespace) -> None:
-    data_directory = arguments.data_dir.resolve()
-    database_path = (
-        arguments.database.resolve()
-        if arguments.database
-        else data_directory / "japan-flags.sqlite"
-    )
+    context = CliContext.from_arguments(arguments)
+    data_directory = context.data_directory
+    database_path = context.database_path
     manifest_path = (
         data_directory / "raw" / "commons" / "all-municipal-svg-manifest.json"
     )
@@ -306,7 +280,7 @@ def _classify_svg(arguments: argparse.Namespace) -> None:
     assignments_by_page = {
         int(file["page_id"]): classify_manifest_file(file) for file in manifest["files"]
     }
-    connection = open_database(database_path)
+    connection = context.open_connection()
     try:
         ingest_flag_asset_manifest(
             connection,
@@ -402,20 +376,15 @@ def _classify_svg(arguments: argparse.Namespace) -> None:
         derived_directory.mkdir(parents=True, exist_ok=True)
         report_path = derived_directory / "svg-classification-report.json"
         report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
-        print(json.dumps(report, ensure_ascii=False, indent=2))
+        print_json(report)
     finally:
         connection.close()
 
 
 def _ingest_current_national(arguments: argparse.Namespace) -> None:
-    data_directory = arguments.data_dir.resolve()
-    database_path = (
-        arguments.database.resolve()
-        if arguments.database
-        else data_directory / "japan-flags.sqlite"
-    )
-    data_directory.mkdir(parents=True, exist_ok=True)
-    connection = open_database(database_path)
+    context = CliContext.from_arguments(arguments, create_data_directory=True)
+    data_directory = context.data_directory
+    connection = context.open_connection()
     parameters = {
         "command": "ingest-current-national",
         "n03_date": arguments.n03_date,
@@ -452,7 +421,7 @@ def _ingest_current_national(arguments: argparse.Namespace) -> None:
             "details": results,
         }
         finish_run(connection, run_id, "completed", result)
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        print_json(result)
     except Exception as error:
         finish_run(
             connection,
@@ -466,13 +435,9 @@ def _ingest_current_national(arguments: argparse.Namespace) -> None:
 
 
 def _export_web(arguments: argparse.Namespace) -> None:
-    data_directory = arguments.data_dir.resolve()
-    database_path = (
-        arguments.database.resolve()
-        if arguments.database
-        else data_directory / "japan-flags.sqlite"
-    )
-    connection = open_database(database_path)
+    context = CliContext.from_arguments(arguments)
+    database_path = context.database_path
+    connection = context.open_connection()
     try:
         result = export_web_data(
             connection,
@@ -482,19 +447,15 @@ def _export_web(arguments: argparse.Namespace) -> None:
             comparison_output_directory=arguments.comparison_output.resolve(),
             overview_vw_tolerance=arguments.overview_vw_tolerance,
         )
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        print_json(result)
     finally:
         connection.close()
 
 
 def _match_current_national(arguments: argparse.Namespace) -> None:
-    data_directory = arguments.data_dir.resolve()
-    database_path = (
-        arguments.database.resolve()
-        if arguments.database
-        else data_directory / "japan-flags.sqlite"
-    )
-    connection = open_database(database_path)
+    context = CliContext.from_arguments(arguments)
+    data_directory = context.data_directory
+    connection = context.open_connection()
     try:
         report = match_current_flags_nationally(
             connection,
@@ -506,19 +467,16 @@ def _match_current_national(arguments: argparse.Namespace) -> None:
             ),
             refresh_usage=arguments.refresh_usage,
         )
-        print(json.dumps(report, ensure_ascii=False, indent=2))
+        print_json(report)
     finally:
         connection.close()
 
 
 def _ingest_current_prefectures(arguments: argparse.Namespace) -> None:
-    data_directory = arguments.data_dir.resolve()
-    database_path = (
-        arguments.database.resolve()
-        if arguments.database
-        else data_directory / "japan-flags.sqlite"
-    )
-    connection = open_database(database_path)
+    context = CliContext.from_arguments(arguments)
+    data_directory = context.data_directory
+    database_path = context.database_path
+    connection = context.open_connection()
     try:
         result = ingest_current_prefectures(
             connection,
@@ -527,7 +485,7 @@ def _ingest_current_prefectures(arguments: argparse.Namespace) -> None:
             snapshot_date=arguments.snapshot_date,
             refresh=arguments.refresh,
         )
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        print_json(result)
     finally:
         connection.close()
 
@@ -535,13 +493,8 @@ def _ingest_current_prefectures(arguments: argparse.Namespace) -> None:
 def _ingest_municipality_profiles(
     arguments: argparse.Namespace,
 ) -> None:
-    data_directory = arguments.data_dir.resolve()
-    database_path = (
-        arguments.database.resolve()
-        if arguments.database
-        else data_directory / "japan-flags.sqlite"
-    )
-    connection = open_database(database_path)
+    context = CliContext.from_arguments(arguments)
+    connection = context.open_connection()
     try:
         result = ingest_municipality_profiles(
             connection,
@@ -549,19 +502,14 @@ def _ingest_municipality_profiles(
             refresh=arguments.refresh,
             jis5_filter=set(arguments.jis5) or None,
         )
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        print_json(result)
     finally:
         connection.close()
 
 
 def _wikipedia_lists_ingest(arguments: argparse.Namespace) -> None:
-    data_directory = arguments.data_dir.resolve()
-    database_path = (
-        arguments.database.resolve()
-        if arguments.database
-        else data_directory / "japan-flags.sqlite"
-    )
-    connection = open_database(database_path)
+    context = CliContext.from_arguments(arguments)
+    connection = context.open_connection()
     try:
         kinds = tuple(arguments.kind) if arguments.kind else ("emblem", "flag")
         result = ingest_wikipedia_lists(
@@ -571,7 +519,7 @@ def _wikipedia_lists_ingest(arguments: argparse.Namespace) -> None:
             refresh_titles=arguments.refresh_titles,
             refresh_pages=arguments.refresh_pages,
         )
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        print_json(result)
     finally:
         connection.close()
 

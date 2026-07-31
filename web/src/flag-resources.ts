@@ -285,10 +285,6 @@ export function cachedPrefectureSpriteAtlas(code: string) {
   return cached.atlas;
 }
 
-export function prefectureSpriteAtlasFailed(code: string) {
-  return failedPrefectureAtlases.has(code);
-}
-
 function evictRasterCache() {
   let totalBytes = [...rasterCache.values()].reduce((sum, raster) => sum + raster.bytes, 0);
   if (totalBytes <= MAX_RASTER_BYTES) return;
@@ -395,18 +391,17 @@ function requestFlagRasters(requests: RasterRequest[], activate: boolean) {
 }
 
 export function requestFlagResources(rasterRequests: RasterRequest[], svgPaths: string[]) {
-  const batches = [
-    requestFlagRasters(rasterRequests, true),
-    requestFlagSvgs(svgPaths, true),
-  ].filter((batch): batch is Promise<boolean> => batch !== null);
-  if (!batches.length) return null;
-  return Promise.all(batches).then((loaded) => loaded.some(Boolean));
+  return loadFlagResources(rasterRequests, svgPaths, true);
 }
 
 export function prefetchFlagResources(rasterRequests: RasterRequest[], svgPaths: string[]) {
+  return loadFlagResources(rasterRequests, svgPaths, false);
+}
+
+function loadFlagResources(rasterRequests: RasterRequest[], svgPaths: string[], activate: boolean) {
   const batches = [
-    requestFlagRasters(rasterRequests, false),
-    requestFlagSvgs(svgPaths, false),
+    requestFlagRasters(rasterRequests, activate),
+    requestFlagSvgs(svgPaths, activate),
   ].filter((batch): batch is Promise<boolean> => batch !== null);
   if (!batches.length) return null;
   return Promise.all(batches).then((loaded) => loaded.some(Boolean));

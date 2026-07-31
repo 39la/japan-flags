@@ -37,6 +37,7 @@ export type RenderPlan = {
   rasterRequests: RasterRequest[];
   svgRequests: string[];
   prefectureAtlasRequests: string[];
+  resourceSignature: string;
 };
 
 export type BuildRenderPlanOptions = {
@@ -51,13 +52,6 @@ export type BuildRenderPlanOptions = {
   marginY?: number;
   flagVisualManifest?: FlagVisualManifest | null;
   motifSettings?: MotifRenderSettings;
-};
-
-export type FlagResourceIntent = Pick<
-  RenderPlan,
-  "rasterRequests" | "svgRequests" | "prefectureAtlasRequests"
-> & {
-  signature: string;
 };
 
 export function featureKey(feature: MapFeature) {
@@ -206,24 +200,18 @@ export function buildRenderPlan({
   }
   for (const path of backgroundSvgRequests) svgRequests.add(path);
 
+  const rasterRequestList = [...rasterRequests.values()];
+  const svgRequestList = [...svgRequests];
+  const prefectureAtlasRequestList = [...prefectureAtlasRequests];
   return {
     features,
-    rasterRequests: [...rasterRequests.values()],
-    svgRequests: [...svgRequests],
-    prefectureAtlasRequests: [...prefectureAtlasRequests],
-  };
-}
-
-export function buildFlagResourceIntent(options: BuildRenderPlanOptions): FlagResourceIntent {
-  const { rasterRequests, svgRequests, prefectureAtlasRequests } = buildRenderPlan(options);
-  return {
-    rasterRequests,
-    svgRequests,
-    prefectureAtlasRequests,
-    signature: [
-      rasterRequests.map((request) => request.key).join(","),
-      svgRequests.join(","),
-      prefectureAtlasRequests.join(","),
+    rasterRequests: rasterRequestList,
+    svgRequests: svgRequestList,
+    prefectureAtlasRequests: prefectureAtlasRequestList,
+    resourceSignature: [
+      rasterRequestList.map((request) => request.key).join(","),
+      svgRequestList.join(","),
+      prefectureAtlasRequestList.join(","),
     ].join("|"),
   };
 }

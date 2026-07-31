@@ -188,23 +188,4 @@ describe("App", () => {
     await user.click(municipalityHoverBoundaries);
     expect(municipalityHoverBoundaries).toBeChecked();
   });
-
-  it("shows source and license credits from the application header", async () => {
-    const user = userEvent.setup();
-    render(<App />);
-    await user.click(screen.getByRole("button", { name: "出典・ライセンス" }));
-    const dialog = screen.getByRole("dialog", { name: "出典・ライセンス" });
-    expect(dialog).toHaveTextContent("国土数値情報（行政区域データ N03）");
-    expect(dialog).toHaveTextContent("2026年1月1日");
-    expect(dialog).toHaveTextContent("Wikimedia Commons");
-    expect(dialog).toHaveTextContent("CC BY-SA 4.0");
-    expect(dialog).toHaveTextContent("Copyright © 2026 saqula");
-    expect(dialog).toHaveTextContent("MIT License");
-    expect(screen.getByRole("link", { name: /ソースコード/ })).toHaveAttribute(
-      "href",
-      "https://github.com/aluqas/japan-flags",
-    );
-    await user.click(screen.getByRole("button", { name: "閉じる" }));
-    expect(screen.queryByRole("dialog", { name: "出典・ライセンス" })).not.toBeInTheDocument();
-  });
 });

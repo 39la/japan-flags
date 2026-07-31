@@ -13,6 +13,12 @@ depends = ["web:preflight"]
 dir = "web"
 run = "deno task dev"
 
+["web:dev-precomposed-svg"]
+description = "Start the precomposed SVG rendering experiment"
+depends = ["web:preflight"]
+dir = "web"
+run = "deno task dev:precomposed-svg"
+
 ["web:test"]
 description = "Run Vitest"
 dir = "web"
@@ -47,6 +53,12 @@ description = "Build the web app from existing generated data"
 depends = ["web:preflight", "web:typecheck"]
 dir = "web"
 run = "deno task build"
+
+["web:build-precomposed-svg"]
+description = "Build the precomposed SVG rendering experiment"
+depends = ["web:preflight", "web:typecheck"]
+dir = "web"
+run = "deno task build:precomposed-svg"
 
 ["render:install-browser"]
 description = "Install the pinned Chromium used for map image export"

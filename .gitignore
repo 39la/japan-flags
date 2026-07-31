@@ -9,6 +9,7 @@ __pycache__/
 coverage/
 web/node_modules/
 web/dist/
+web/dist-precomposed-svg/
 web/.vite/
 web/*.tsbuildinfo
 web/vite.config.js

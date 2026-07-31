@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { focusFeatureCamera, sceneCacheContainsViewport } from "./TerritoryMap";
+import { focusFeatureCamera, sceneCacheContainsViewport, zoomCamera } from "./map-camera";
 import type { RenderedFeature } from "./map-geometry";
 import type { TerritoryFeature } from "./types";
 
@@ -61,5 +61,14 @@ describe("focusFeatureCamera", () => {
     expect(camera!.k).toBeGreaterThan(1);
     expect(camera!.x + camera!.k * 450).toBeCloseTo(500);
     expect(camera!.y + camera!.k * 350).toBeCloseTo(380);
+  });
+});
+
+describe("zoomCamera", () => {
+  it("keeps the map center fixed while changing scale", () => {
+    const camera = zoomCamera({ x: 10, y: 20, k: 2 }, 1.5);
+    expect(camera.k).toBe(3);
+    expect(camera.x + camera.k * ((500 - 10) / 2)).toBeCloseTo(500);
+    expect(camera.y + camera.k * ((380 - 20) / 2)).toBeCloseTo(380);
   });
 });

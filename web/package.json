@@ -7,7 +7,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:precomposed-svg": "vite --config experiments/precomposed-svg/vite.config.ts",
     "build": "vite build",
+    "build:precomposed-svg": "vite build --config experiments/precomposed-svg/vite.config.ts",
     "preview": "vite preview",
     "render:maps": "deno run -A scripts/render-maps.ts",
     "render:install-browser": "deno run -A npm:playwright install chromium",
@@ -15,15 +17,16 @@
     "cloudflare:dev": "wrangler dev",
     "cloudflare:deploy": "wrangler deploy",
     "cloudflare:deploy:dry-run": "wrangler deploy --dry-run",
-    "typecheck": "tsc -b",
+    "typecheck": "tsc -b && tsc --project experiments/precomposed-svg/tsconfig.json",
+    "typecheck:precomposed-svg": "tsc --project experiments/precomposed-svg/tsconfig.json",
     "build:flag-sprites": "deno run -A scripts/build-flag-sprites.mjs",
     "build:flag-sprites:full-only": "deno run -A scripts/build-flag-sprites.mjs --recheck-full-only",
     "validate:generated-data": "deno run -A scripts/validate-generated-data.mjs",
     "report:render-assets": "deno run -A scripts/report-render-assets.mjs",
     "test": "vitest run",
-    "lint": "oxlint --react-plugin --vitest-plugin --import-plugin --jsx-a11y-plugin src scripts vite.config.ts",
-    "format": "oxfmt src scripts vite.config.ts wrangler.jsonc package.json deno.json .oxlintrc.json .oxfmtrc.json",
-    "format:check": "oxfmt --check src scripts vite.config.ts wrangler.jsonc package.json deno.json .oxlintrc.json .oxfmtrc.json"
+    "lint": "oxlint --react-plugin --vitest-plugin --import-plugin --jsx-a11y-plugin src scripts experiments/precomposed-svg vite.config.ts",
+    "format": "oxfmt src scripts experiments/precomposed-svg vite.config.ts wrangler.jsonc package.json deno.json .oxlintrc.json .oxfmtrc.json",
+    "format:check": "oxfmt --check src scripts experiments/precomposed-svg vite.config.ts wrangler.jsonc package.json deno.json .oxlintrc.json .oxfmtrc.json"
   },
   "dependencies": {
     "d3-geo": "^3.1.1",

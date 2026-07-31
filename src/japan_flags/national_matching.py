@@ -12,6 +12,7 @@ from .database import ingest_matches
 from .http import polite_delay
 from .known_current_flags import known_current_flag_matches
 from .matching import (
+    choose_primary_flags,
     enwiki_titles,
     match_commons_files_to_municipalities,
     wikidata_item_ids,
@@ -170,24 +171,6 @@ def _municipalities(
             (snapshot_date,),
         ).fetchall()
     ]
-
-
-def _choose_primary_flags(matches: list[dict[str, Any]]) -> None:
-    grouped: dict[str, list[dict[str, Any]]] = {}
-    for match in matches:
-        grouped.setdefault(match["jis5"], []).append(match)
-    for group in grouped.values():
-        preferred = sorted(
-            group,
-            key=lambda match: (
-                match["method"] == "parent_city_flag_inheritance",
-                "(" in match["title"],
-                match["title"].lower(),
-                match["page_id"],
-            ),
-        )[0]
-        for match in group:
-            match["is_primary"] = match is preferred
 
 
 def _cached_code_resolutions(
@@ -367,7 +350,7 @@ def match_current_flags_nationally(
         for item in matching["unmatched"]
         if item["page_id"] not in curated_page_ids
     ]
-    _choose_primary_flags(matching["matches"])
+    choose_primary_flags(matching["matches"])
     ingest_matches(
         connection,
         matching["matches"],

@@ -42,16 +42,6 @@ type CompiledMapScene = {
   renderedBoundaries: RenderedBoundary[];
 };
 
-export type MapSceneCompileMetrics = {
-  sceneCommitCount: number;
-  featureCompilationCount: number;
-  boundaryCompilationCount: number;
-  boundaryCacheHitCount: number;
-  maxSliceMs: number;
-  yieldCount: number;
-  boundaryPointCount: number;
-};
-
 const GEOMETRY_COMPILE_SLICE_MS = 8;
 const EMPTY_RENDERED_FEATURES: RenderedFeature[] = [];
 const EMPTY_RENDERED_BOUNDARIES: RenderedBoundary[] = [];
@@ -471,15 +461,6 @@ export function useCompiledMapScene(
   const featureCacheRef = useRef<RenderedFeatureCache>(new WeakMap());
   const boundaryCacheRef = useRef<RenderedBoundaryCache>(new WeakMap());
   const compileGenerationRef = useRef(0);
-  const metricsRef = useRef<MapSceneCompileMetrics>({
-    sceneCommitCount: 0,
-    featureCompilationCount: 0,
-    boundaryCompilationCount: 0,
-    boundaryCacheHitCount: 0,
-    maxSliceMs: 0,
-    yieldCount: 0,
-    boundaryPointCount: 0,
-  });
   const [compiledScene, setCompiledScene] = useState<CompiledMapScene>({
     generation: 0,
     layer: null,
@@ -504,7 +485,6 @@ export function useCompiledMapScene(
     compileGenerationRef.current = generation;
     const cache = featureCacheRef.current;
     if (!renderer) {
-      metricsRef.current.sceneCommitCount += 1;
       setCompiledScene({
         generation,
         layer,
@@ -522,7 +502,6 @@ export function useCompiledMapScene(
     const boundaryTasks = boundaryGroups.map((group) => {
       const cached = cachedRenderedBoundaries(boundaryCacheRef.current, group, renderer.projection);
       if (cached) {
-        metricsRef.current.boundaryCacheHitCount += 1;
         return { group, cached, compilers: null };
       }
       return {
@@ -551,7 +530,6 @@ export function useCompiledMapScene(
             const item = current.compiler.next();
             if (!item) continue;
             renderedFeatureItems.push(item);
-            metricsRef.current.featureCompilationCount += Number(current.compiler.compiled);
             featureIndex += 1;
             continue;
           }
@@ -578,24 +556,16 @@ export function useCompiledMapScene(
           const boundary = compiler.next();
           if (boundary) {
             activeBoundaryItems.push(boundary);
-            metricsRef.current.boundaryCompilationCount += Number(compiler.compiled);
-            metricsRef.current.boundaryPointCount += boundary.pointCount;
             boundaryCompilerIndex += 1;
           }
         } while (hasPendingWork() && performance.now() < sliceDeadline);
-        metricsRef.current.maxSliceMs = Math.max(
-          metricsRef.current.maxSliceMs,
-          performance.now() - sliceStart,
-        );
         if (hasPendingWork()) {
-          metricsRef.current.yieldCount += 1;
           await yieldToBrowser();
         }
       }
       if (cancelled || compileGenerationRef.current !== generation) {
         return;
       }
-      metricsRef.current.sceneCommitCount += 1;
       setCompiledScene({
         generation,
         layer,
@@ -617,7 +587,6 @@ export function useCompiledMapScene(
       compiledScene.layer === layer ? compiledScene.renderedBoundaries : EMPTY_RENDERED_BOUNDARIES,
     generation: compiledScene.layer === layer ? compiledScene.generation : 0,
     ready: compiledScene.layer === layer && compiledScene.source === features,
-    metricsRef,
     projection,
   };
 }
