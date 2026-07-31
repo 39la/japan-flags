@@ -1,0 +1,21 @@
+[project]
+name = "japan-flags"
+version = "0.1.0"
+description = "Japanese municipal flag and administrative boundary ingestion prototype"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.13"
+dependencies = ["shapely>=2.1.1,<3", "topojson>=1.10,<2"]
+
+[dependency-groups]
+dev = ["ruff>=0.15.20,<0.16"]
+
+[project.scripts]
+japan-flags = "japan_flags.cli:main"
+
+[project.urls]
+Source = "https://github.com/aluqas/japan-flags"
+
+[build-system]
+requires = ["uv_build>=0.8.15,<0.9.0"]
+build-backend = "uv_build"

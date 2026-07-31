@@ -1,0 +1,7 @@
+["repo:format"]
+description = "Format documentation and repository configuration with Oxfmt"
+run = "web/node_modules/.bin/oxfmt -c web/.oxfmtrc.json README.md NOTICE.md CONTRIBUTING.md 'docs/**/*.md' .mise.toml '.mise/tasks/*.toml' pyproject.toml"
+
+["repo:format-check"]
+description = "Check documentation and repository configuration formatting"
+run = "web/node_modules/.bin/oxfmt -c web/.oxfmtrc.json --check README.md NOTICE.md CONTRIBUTING.md 'docs/**/*.md' .mise.toml '.mise/tasks/*.toml' pyproject.toml"

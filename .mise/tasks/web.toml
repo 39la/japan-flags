@@ -1,0 +1,75 @@
+["web:sync"]
+description = "Install frozen web dependencies with Deno"
+dir = "web"
+run = "deno install --frozen"
+
+["web:preflight"]
+description = "Check that generated data required by Vite exists"
+run = "test -f web/public/data/territories-overview-l0.topojson || { echo 'Generated map data is missing; run: mise run generate' >&2; exit 1; }"
+
+["web:dev"]
+description = "Start Vite without regenerating data"
+depends = ["web:preflight"]
+dir = "web"
+run = "deno task dev"
+
+["web:test"]
+description = "Run Vitest"
+dir = "web"
+run = "deno task test"
+
+["web:typecheck"]
+description = "Type-check the web app with TypeScript"
+dir = "web"
+run = "deno task typecheck"
+
+["web:lint"]
+description = "Lint web sources with Oxlint"
+dir = "web"
+run = "deno task lint"
+
+["web:format"]
+description = "Format web sources with Oxfmt"
+dir = "web"
+run = "deno task format"
+
+["web:format-check"]
+description = "Check web formatting with Oxfmt"
+dir = "web"
+run = "deno task format:check"
+
+["web:check"]
+description = "Run Web formatting, lint, type-check, and tests"
+depends = ["web:format-check", "web:lint", "web:typecheck", "web:test"]
+
+["web:build"]
+description = "Build the web app from existing generated data"
+depends = ["web:preflight", "web:typecheck"]
+dir = "web"
+run = "deno task build"
+
+["render:install-browser"]
+description = "Install the pinned Chromium used for map image export"
+dir = "web"
+run = "deno task render:install-browser"
+
+["render:maps"]
+description = "Export national, regional, or prefectural map images"
+depends = ["web:build"]
+dir = "web"
+run = "deno task render:maps"
+
+["deploy:check"]
+description = "Build and validate the Cloudflare Workers Static Assets deployment"
+depends = ["web:build"]
+dir = "web"
+run = """
+deno task deploy:validate
+deno task cloudflare:deploy:dry-run
+"""
+
+[deploy]
+description = "Validate and deploy the site to Cloudflare Workers Static Assets"
+depends = ["deploy:check"]
+dir = "web"
+run = "deno task cloudflare:deploy"

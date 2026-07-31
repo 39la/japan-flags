@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "defaults": {
+    "anchorMode": "incenter",
+    "anchorBias": 1,
+    "motifScale": 0.9,
+    "overflow": 0,
+    "edgePadding": 0.08,
+    "minSizeRatio": 0.12,
+    "maxSizeRatio": 0.7,
+    "anchorOffsetX": 0,
+    "anchorOffsetY": 0
+  },
+  "flags": {}
+}

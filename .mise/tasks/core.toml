@@ -1,0 +1,35 @@
+[setup]
+description = "Install frozen Python and web dependencies"
+depends = ["py:sync", "web:sync"]
+
+[dev]
+description = "Start the web development server without regenerating data"
+depends = ["web:dev"]
+
+[check]
+description = "Run all static checks and tests"
+depends = ["repo:format-check", "py:check", "web:check"]
+
+[format]
+description = "Format Python, web, documentation, and repository configuration"
+depends = ["repo:format", "py:format", "web:format"]
+
+[build]
+description = "Build the web app from existing generated data"
+depends = ["web:build"]
+
+[generate]
+description = "Regenerate all web data and flag assets (expensive)"
+run = """
+mise run data:export
+mise run assets:build
+mise run data:validate
+"""
+
+[ci]
+description = "Install dependencies, check the repository, and build the web app"
+run = """
+mise run setup
+mise run check
+mise run build
+"""

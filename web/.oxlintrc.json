@@ -1,0 +1,15 @@
+{
+  "categories": {
+    "correctness": "error"
+  },
+  "rules": {
+    "jsx-a11y/prefer-tag-over-role": "off",
+    "react/react-in-jsx-scope": "off",
+    "react-hooks/exhaustive-deps": "off",
+    "unicorn/no-new-array": "off",
+    "unicorn/no-useless-spread": "off",
+    "vitest/no-conditional-expect": "off",
+    "vitest/require-mock-type-parameters": "off"
+  },
+  "ignorePatterns": ["dist/**", "public/**", "node_modules/**"]
+}

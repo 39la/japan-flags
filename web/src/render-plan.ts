@@ -1,0 +1,229 @@
+import {
+  flagRenderLod,
+  DIRECT_RASTER_MIN_BUCKET,
+  PREFECTURE_ATLAS_BUCKET,
+  type RasterBucket,
+} from "./flag-render-lod";
+import { getFlagFitStrategy, placeMotif, type MotifPlacementOptions } from "./flag-fit";
+import { rasterKey, type SpriteEntry, type RasterRequest } from "./flag-resources";
+import { MAP_HEIGHT, MAP_WIDTH } from "./map-model";
+import type { RenderedFeature } from "./map-geometry";
+import type { FlagFitMode, MapFeature, ViewTransform } from "./types";
+import {
+  DEFAULT_MOTIF_RENDER_SETTINGS,
+  motifPlacementForFlag,
+  resolveFlagVisual,
+  type FlagVisualEntry,
+  type FlagVisualManifest,
+  type MotifRenderSettings,
+} from "./flag-visuals";
+
+type DrawableFeature = RenderedFeature & {
+  canvasPath: Path2D;
+};
+
+export type PlannedFeature = {
+  item: DrawableFeature;
+  hasFlag: boolean;
+  resourcePath: string | null;
+  visual: FlagVisualEntry | null;
+  motifPlacement: MotifPlacementOptions | null;
+  rasterBucket: RasterBucket | null;
+  useDirectSvg: boolean;
+};
+
+export type RenderPlan = {
+  features: PlannedFeature[];
+  rasterRequests: RasterRequest[];
+  svgRequests: string[];
+  prefectureAtlasRequests: string[];
+};
+
+export type BuildRenderPlanOptions = {
+  items: RenderedFeature[];
+  camera: ViewTransform;
+  renderScale: number;
+  fitMode: FlagFitMode;
+  spriteEntries?: Record<string, SpriteEntry>;
+  focusedPrefecture: string | null;
+  spriteAtlasFailed: boolean;
+  marginX?: number;
+  marginY?: number;
+  flagVisualManifest?: FlagVisualManifest | null;
+  motifSettings?: MotifRenderSettings;
+};
+
+export type FlagResourceIntent = Pick<
+  RenderPlan,
+  "rasterRequests" | "svgRequests" | "prefectureAtlasRequests"
+> & {
+  signature: string;
+};
+
+export function featureKey(feature: MapFeature) {
+  return feature.properties.entityType === "prefecture"
+    ? feature.properties.mapPart
+    : `territory:${feature.properties.territoryVersionId}`;
+}
+
+export function prefectureCode(feature: MapFeature) {
+  return feature.properties.entityType === "prefecture"
+    ? feature.properties.prefectureCode
+    : (feature.properties.prefectureCode ?? feature.properties.jis5.slice(0, 2));
+}
+
+export function isVisible(
+  bounds: [[number, number], [number, number]],
+  transform: ViewTransform,
+  marginX = 0,
+  marginY = 0,
+) {
+  const [[x0, y0], [x1, y1]] = bounds;
+  return !(
+    x1 * transform.k + transform.x < -marginX ||
+    y1 * transform.k + transform.y < -marginY ||
+    x0 * transform.k + transform.x > MAP_WIDTH + marginX ||
+    y0 * transform.k + transform.y > MAP_HEIGHT + marginY
+  );
+}
+
+export function buildRenderPlan({
+  items,
+  camera,
+  renderScale,
+  fitMode,
+  spriteEntries,
+  focusedPrefecture,
+  spriteAtlasFailed,
+  marginX = 0,
+  marginY = 0,
+  flagVisualManifest = null,
+  motifSettings = DEFAULT_MOTIF_RENDER_SETTINGS,
+}: BuildRenderPlanOptions): RenderPlan {
+  const features: PlannedFeature[] = [];
+  const candidates: Array<{
+    path: string;
+    prefectureCode: string;
+    pixelSize: number;
+    bucket: RasterBucket;
+    useDirectSvg: boolean;
+  }> = [];
+  const strategy = getFlagFitStrategy(fitMode === "motif" ? "cover" : fitMode);
+  const backgroundSvgRequests = new Set<string>();
+
+  for (const item of items) {
+    if (!item.canvasPath || !isVisible(item.bounds, camera, marginX, marginY)) {
+      continue;
+    }
+    const flagPath = item.feature.properties.flagPath;
+    const hasFlag = Boolean(
+      flagPath && (!focusedPrefecture || prefectureCode(item.feature) === focusedPrefecture),
+    );
+    let rasterBucket: RasterBucket | null = null;
+    let useDirectSvg = false;
+    let resourcePath: string | null = flagPath;
+    let visual: FlagVisualEntry | null = null;
+    let motifPlacement: MotifPlacementOptions | null = null;
+
+    if (hasFlag && flagPath) {
+      visual = resolveFlagVisual(flagVisualManifest, flagPath);
+      const separatedVisual = fitMode === "motif" && visual.kind === "separated" ? visual : null;
+      resourcePath = separatedVisual?.motifPath ?? flagPath;
+      if (separatedVisual) {
+        motifPlacement = motifPlacementForFlag(
+          motifSettings,
+          item.feature.properties.flagPageId,
+          separatedVisual,
+        );
+      }
+      const [[x0, y0], [x1, y1]] = item.bounds;
+      const sprite = spriteEntries?.[resourcePath];
+      const imageWidth =
+        sprite?.width ??
+        (separatedVisual ? separatedVisual.motifAspectRatio : Math.max(1, x1 - x0));
+      const imageHeight = sprite?.height ?? (separatedVisual ? 1 : Math.max(1, y1 - y0));
+      const placement =
+        separatedVisual && motifPlacement
+          ? placeMotif(
+              imageWidth,
+              imageHeight,
+              item.bounds,
+              item.feature.properties.visualAnchor,
+              item.feature.properties.visualSafeRadiusRatio,
+              motifPlacement,
+              item.feature.properties.visualCentroidAnchor,
+              item.feature.properties.visualOptimizedAnchor,
+              item.feature.properties.visualComponentBounds,
+            )
+          : strategy.place(imageWidth, imageHeight, item.bounds);
+      const pixelSize = Math.max(placement.width, placement.height) * renderScale;
+      const lod = flagRenderLod(pixelSize);
+      rasterBucket = lod.rasterBucket;
+      useDirectSvg = lod.useDirectSvg;
+      if (rasterBucket) {
+        candidates.push({
+          path: resourcePath,
+          prefectureCode: prefectureCode(item.feature),
+          pixelSize,
+          bucket: rasterBucket,
+          useDirectSvg,
+        });
+      }
+      if (separatedVisual?.background.kind === "asset") {
+        backgroundSvgRequests.add(separatedVisual.background.path);
+      }
+    }
+
+    features.push({
+      item: item as DrawableFeature,
+      hasFlag,
+      resourcePath,
+      visual,
+      motifPlacement,
+      rasterBucket,
+      useDirectSvg,
+    });
+  }
+
+  const rasterRequests = new Map<string, RasterRequest>();
+  const svgRequests = new Set<string>();
+  const prefectureAtlasRequests = new Set<string>();
+  candidates.sort((left, right) => right.pixelSize - left.pixelSize);
+  for (const candidate of candidates) {
+    if (candidate.useDirectSvg) svgRequests.add(candidate.path);
+    if (candidate.bucket === PREFECTURE_ATLAS_BUCKET && candidate.prefectureCode) {
+      prefectureAtlasRequests.add(candidate.prefectureCode);
+    }
+    if (candidate.bucket < DIRECT_RASTER_MIN_BUCKET && !spriteAtlasFailed) {
+      continue;
+    }
+    const key = rasterKey(candidate.path, candidate.bucket);
+    rasterRequests.set(key, {
+      key,
+      path: candidate.path,
+      bucket: candidate.bucket,
+    });
+  }
+  for (const path of backgroundSvgRequests) svgRequests.add(path);
+
+  return {
+    features,
+    rasterRequests: [...rasterRequests.values()],
+    svgRequests: [...svgRequests],
+    prefectureAtlasRequests: [...prefectureAtlasRequests],
+  };
+}
+
+export function buildFlagResourceIntent(options: BuildRenderPlanOptions): FlagResourceIntent {
+  const { rasterRequests, svgRequests, prefectureAtlasRequests } = buildRenderPlan(options);
+  return {
+    rasterRequests,
+    svgRequests,
+    prefectureAtlasRequests,
+    signature: [
+      rasterRequests.map((request) => request.key).join(","),
+      svgRequests.join(","),
+      prefectureAtlasRequests.join(","),
+    ].join("|"),
+  };
+}

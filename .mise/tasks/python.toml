@@ -1,0 +1,23 @@
+["py:sync"]
+description = "Create or update the uv environment from the lockfile"
+run = "uv sync --frozen"
+
+["py:test"]
+description = "Run the Python test suite"
+run = "uv run python -m unittest discover -s tests -v"
+
+["py:lint"]
+description = "Lint Python sources and tests with Ruff"
+run = "uv run ruff check src tests"
+
+["py:format"]
+description = "Format Python sources and tests with Ruff"
+run = "uv run ruff format src tests"
+
+["py:format-check"]
+description = "Check Python formatting with Ruff"
+run = "uv run ruff format --check src tests"
+
+["py:check"]
+description = "Run Python formatting, lint, and tests"
+depends = ["py:format-check", "py:lint", "py:test"]

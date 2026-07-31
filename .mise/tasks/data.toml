@@ -1,0 +1,65 @@
+["data:ingest-miyazaki"]
+description = "Ingest the Miyazaki Commons SVG and N03 boundary pilot"
+run = """
+uv run japan-flags ingest \
+  --prefecture-code 45 \
+  --prefecture-name 宮崎県 \
+  --commons-category "Category:SVG flags of municipalities in Miyazaki Prefecture" \
+  --n03-date {{vars.snapshot_date}}
+"""
+
+["data:report"]
+description = "Print the current database summary"
+run = "uv run japan-flags report"
+
+["data:fetch-svg"]
+description = "Download every current and historical municipal SVG from Commons"
+run = "uv run japan-flags fetch-svg-all"
+
+["data:classify-svg"]
+description = "Assign deterministic initial metadata to every downloaded SVG"
+run = "uv run japan-flags classify-svg"
+
+["data:ingest-boundaries"]
+description = "Ingest all 47 prefectures from the current N03 snapshot"
+run = "uv run japan-flags ingest-current-national --n03-date {{vars.snapshot_date}}"
+
+["data:match-flags"]
+description = "Match current Commons flags to all current territory polygons"
+run = "uv run japan-flags match-current-national --snapshot-date {{vars.snapshot_date}}"
+
+["data:ingest-prefectures"]
+description = "Build current prefecture polygons and attach Wikidata P41 flags"
+run = "uv run japan-flags ingest-current-prefectures --snapshot-date {{vars.snapshot_date}}"
+
+["data:ingest-profiles"]
+description = "Cache current Wikidata/Wikipedia municipality profiles"
+run = "uv run japan-flags ingest-municipality-profiles --snapshot-date {{vars.snapshot_date}}"
+
+["data:export"]
+description = "Export SQLite data and geometry for the web app"
+run = "uv run japan-flags export-web --snapshot-date {{vars.snapshot_date}}"
+
+["assets:build"]
+description = "Build flag visuals and sprite atlases"
+dir = "web"
+run = "deno task build:flag-sprites"
+
+["assets:build-full-only"]
+description = "Recheck only flags that currently use full rendering"
+dir = "web"
+run = "deno task build:flag-sprites:full-only"
+
+["data:validate"]
+description = "Validate generated web data and flag assets"
+dir = "web"
+run = "deno task validate:generated-data"
+
+["data:report-render-assets"]
+description = "Report geometry LOD and flag atlas transfer/decoded sizes"
+dir = "web"
+run = "deno task report:render-assets"
+
+["data:wikipedia-lists"]
+description = "Ingest Japan wiki municipal emblem and flag list pages into SQLite"
+run = "uv run japan-flags wikipedia-lists-ingest --snapshot-date {{vars.snapshot_date}}"

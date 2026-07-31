@@ -1,0 +1,16 @@
+[tools]
+deno = "2.9.4"
+python = "3.13.14"
+uv = "0.12.0"
+
+[vars]
+snapshot_date = "20260101"
+
+[task_config]
+includes = [
+  ".mise/tasks/core.toml",
+  ".mise/tasks/quality.toml",
+  ".mise/tasks/python.toml",
+  ".mise/tasks/data.toml",
+  ".mise/tasks/web.toml",
+]
