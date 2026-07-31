@@ -9,6 +9,7 @@ import {
 } from "react";
 import { fitCanvasViewport, viewportPointToContent } from "./canvas-viewport";
 import {
+  boundedCanvasPixelRatio,
   createSceneCache,
   drawCachedScene,
   drawMapOverlay,
@@ -17,6 +18,7 @@ import {
   resizeVisibleCanvases,
   type SceneCache,
 } from "./canvas-renderer";
+import { buildFeatureHitMap, hitTestFeature, type FeatureHitMap } from "./feature-hit-map";
 import {
   loadSpriteAtlas,
   prefetchFlagResources,
@@ -40,7 +42,15 @@ import {
 import { exportCamera, type MapExportRequest } from "./map-export";
 import { useCompiledMapScene } from "./map-geometry";
 import { MAP_HEIGHT, MAP_WIDTH } from "./map-model";
-import { buildRenderPlan, featureKey, isVisible, prefectureCode } from "./render-plan";
+import {
+  buildRenderLayout,
+  buildRenderPlanFromLayout,
+  featureKey,
+  isVisible,
+  prefectureCode,
+  type RenderLayout,
+  type RenderPlan,
+} from "./render-plan";
 import { geometryLodForRenderScale, physicalRenderScale, type GeometryLod } from "./render-scale";
 import { buildMapSvg } from "./svg-renderer";
 import type { FlagFitMode, MapDisplayOptions, MapFeature, MapLayer, ViewTransform } from "./types";
@@ -80,15 +90,30 @@ type DragState = {
 const SCENE_OVERSCAN = 1.6;
 const CAMERA_SETTLE_MS = 120;
 const MAX_SCENE_PIXEL_RATIO = 1.5;
+const MAX_SCENE_PIXELS = 16 * 1024 * 1024;
 const DETAIL_PREFETCH_MARGIN = 160;
 const EMPTY_BOUNDARY_FEATURES: MapFeature[] = [];
 
-function canvasPoint(canvas: HTMLCanvasElement, clientX: number, clientY: number) {
-  const rect = canvas.getBoundingClientRect();
+type InteractionViewport = {
+  left: number;
+  top: number;
+  viewport: ReturnType<typeof fitCanvasViewport>;
+};
+
+function canvasPoint(measurement: InteractionViewport, clientX: number, clientY: number) {
   return viewportPointToContent(
-    fitCanvasViewport(rect.width, rect.height, MAP_WIDTH, MAP_HEIGHT),
-    clientX - rect.left,
-    clientY - rect.top,
+    measurement.viewport,
+    clientX - measurement.left,
+    clientY - measurement.top,
+  );
+}
+
+function scenePixelRatio(width: number, height: number) {
+  return boundedCanvasPixelRatio(
+    width * SCENE_OVERSCAN,
+    height * SCENE_OVERSCAN,
+    Math.min(window.devicePixelRatio || 1, MAX_SCENE_PIXEL_RATIO),
+    MAX_SCENE_PIXELS,
   );
 }
 
@@ -160,7 +185,23 @@ export function TerritoryMap({
   const baseCanvasRef = useRef<HTMLCanvasElement>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
   const sceneCacheRef = useRef<SceneCache | null>(null);
-  const hitContextRef = useRef<CanvasRenderingContext2D | null>(null);
+  const hitMapRef = useRef<FeatureHitMap | null>(null);
+  const interactionViewportRef = useRef<InteractionViewport | null>(null);
+  const renderLayoutCacheRef = useRef<{
+    generation: number;
+    renderScale: number;
+    fitMode: FlagFitMode;
+    focusedPrefecture: string | null;
+    spriteAtlas: SpriteAtlas | null;
+    flagVisualManifest: FlagVisualManifest | null;
+    motifSettingsSignature: string;
+    layout: RenderLayout;
+  } | null>(null);
+  const prefetchPlanCacheRef = useRef<{
+    layout: RenderLayout;
+    camera: ViewTransform;
+    plan: RenderPlan;
+  } | null>(null);
   const drag = useRef<DragState | null>(null);
   const cameraRef = useRef<ViewTransform>({ ...nationalView });
   const initializedRef = useRef(false);
@@ -180,8 +221,6 @@ export function TerritoryMap({
   const motifSettingsSignature = JSON.stringify(motifSettings);
 
   useEffect(() => {
-    const hitCanvas = document.createElement("canvas");
-    hitContextRef.current = hitCanvas.getContext("2d");
     sceneCacheRef.current = createSceneCache(
       layer,
       fitMode,
@@ -197,8 +236,16 @@ export function TerritoryMap({
       }
       resourceBatchGenerationRef.current += 1;
       sceneCacheRef.current = null;
+      hitMapRef.current = null;
     };
   }, []);
+
+  useEffect(() => {
+    hitMapRef.current = buildFeatureHitMap(renderedFeatures);
+    return () => {
+      hitMapRef.current = null;
+    };
+  }, [renderedFeatures]);
 
   useEffect(() => {
     if (spriteAtlas || spriteAtlasFailed) return;
@@ -328,6 +375,54 @@ export function TerritoryMap({
     [renderedFeatures, onVisiblePrefecturesChange],
   );
 
+  const getRenderLayout = useCallback(
+    (renderScale: number) => {
+      const cached = renderLayoutCacheRef.current;
+      if (
+        cached?.generation === sceneGeneration &&
+        cached.renderScale === renderScale &&
+        cached.fitMode === fitMode &&
+        cached.focusedPrefecture === focusedPrefecture &&
+        cached.spriteAtlas === spriteAtlas &&
+        cached.flagVisualManifest === flagVisualManifest &&
+        cached.motifSettingsSignature === motifSettingsSignature
+      ) {
+        return cached.layout;
+      }
+      const layout = buildRenderLayout({
+        items: renderedFeatures,
+        renderScale,
+        fitMode,
+        spriteEntries: spriteAtlas?.sprites,
+        focusedPrefecture,
+        flagVisualManifest,
+        motifSettings,
+      });
+      renderLayoutCacheRef.current = {
+        generation: sceneGeneration,
+        renderScale,
+        fitMode,
+        focusedPrefecture,
+        spriteAtlas,
+        flagVisualManifest,
+        motifSettingsSignature,
+        layout,
+      };
+      prefetchPlanCacheRef.current = null;
+      return layout;
+    },
+    [
+      fitMode,
+      focusedPrefecture,
+      flagVisualManifest,
+      motifSettings,
+      motifSettingsSignature,
+      renderedFeatures,
+      sceneGeneration,
+      spriteAtlas,
+    ],
+  );
+
   const renderVectorScene = useCallback(
     (camera: ViewTransform) => {
       const visibleCanvas = baseCanvasRef.current;
@@ -337,7 +432,7 @@ export function TerritoryMap({
       }
       const width = Math.max(1, visibleCanvas.clientWidth);
       const height = Math.max(1, visibleCanvas.clientHeight);
-      const ratio = Math.min(window.devicePixelRatio || 1, MAX_SCENE_PIXEL_RATIO);
+      const ratio = scenePixelRatio(width, height);
       const viewport = fitCanvasViewport(width * ratio, height * ratio, MAP_WIDTH, MAP_HEIGHT);
       const marginX = ((SCENE_OVERSCAN - 1) * MAP_WIDTH) / 2;
       const marginY = ((SCENE_OVERSCAN - 1) * MAP_HEIGHT) / 2;
@@ -370,18 +465,11 @@ export function TerritoryMap({
         geometryLodRef.current = geometryLod;
         onGeometryLodChange?.(geometryLod);
       }
-      const plan = buildRenderPlan({
-        items: renderedFeatures,
+      const plan = buildRenderPlanFromLayout(getRenderLayout(renderScale), {
         camera,
-        renderScale,
-        fitMode,
-        spriteEntries: spriteAtlas?.sprites,
-        focusedPrefecture,
         spriteAtlasFailed,
         marginX,
         marginY,
-        flagVisualManifest,
-        motifSettings,
       });
       const resourceGeneration = resourceBatchGenerationRef.current + 1;
       resourceBatchGenerationRef.current = resourceGeneration;
@@ -393,10 +481,10 @@ export function TerritoryMap({
       resourceBatchPendingRef.current = pendingResources.length > 0;
       if (pendingResources.length) {
         if (exportRequest) setExportReady(false);
-        void Promise.all(pendingResources).then(() => {
+        void Promise.all(pendingResources).then((results) => {
           if (resourceBatchGenerationRef.current === resourceGeneration) {
             resourceBatchPendingRef.current = false;
-            resourceRevisionRef.current += 1;
+            if (results.some(Boolean)) resourceRevisionRef.current += 1;
             scheduleSettledRef.current(0);
           }
         });
@@ -423,12 +511,10 @@ export function TerritoryMap({
     [
       fitMode,
       focusedPrefecture,
-      flagVisualManifest,
+      getRenderLayout,
       layer,
-      motifSettings,
       motifSettingsSignature,
       renderedBoundaries,
-      renderedFeatures,
       sceneGeneration,
       spriteAtlas,
       spriteAtlasFailed,
@@ -439,6 +525,19 @@ export function TerritoryMap({
 
   const ensureVisibleCanvasSizes = useCallback(() => {
     return resizeVisibleCanvases(baseCanvasRef.current, overlayCanvasRef.current);
+  }, []);
+
+  const updateInteractionViewport = useCallback(() => {
+    const canvas = overlayCanvasRef.current;
+    if (!canvas) return null;
+    const rect = canvas.getBoundingClientRect();
+    const measurement = {
+      left: rect.left,
+      top: rect.top,
+      viewport: fitCanvasViewport(rect.width, rect.height, MAP_WIDTH, MAP_HEIGHT),
+    };
+    interactionViewportRef.current = measurement;
+    return measurement;
   }, []);
 
   const drawCachedBase = useCallback(() => {
@@ -510,7 +609,10 @@ export function TerritoryMap({
       const canvas = baseCanvasRef.current;
       const cache = sceneCacheRef.current;
       if (!canvas || !cache || !cache.canvas.width) return false;
-      const ratio = Math.min(window.devicePixelRatio || 1, MAX_SCENE_PIXEL_RATIO);
+      const ratio = scenePixelRatio(
+        Math.max(1, canvas.clientWidth),
+        Math.max(1, canvas.clientHeight),
+      );
       const visiblePixelWidth = Math.round(Math.max(1, canvas.clientWidth) * ratio);
       const visiblePixelHeight = Math.round(Math.max(1, canvas.clientHeight) * ratio);
       return (
@@ -568,24 +670,27 @@ export function TerritoryMap({
     (camera: ViewTransform) => {
       const canvas = baseCanvasRef.current;
       if (!canvas || !renderedFeatures.length) return;
-      const ratio = Math.min(window.devicePixelRatio || 1, MAX_SCENE_PIXEL_RATIO);
-      const viewport = fitCanvasViewport(
-        Math.max(1, canvas.clientWidth) * ratio,
-        Math.max(1, canvas.clientHeight) * ratio,
-        MAP_WIDTH,
-        MAP_HEIGHT,
-      );
-      const plan = buildRenderPlan({
-        items: renderedFeatures,
-        camera,
-        renderScale: physicalRenderScale(viewport.scale, camera.k),
-        fitMode,
-        spriteEntries: spriteAtlas?.sprites,
-        focusedPrefecture,
-        spriteAtlasFailed,
-        flagVisualManifest,
-        motifSettings,
-      });
+      const width = Math.max(1, canvas.clientWidth);
+      const height = Math.max(1, canvas.clientHeight);
+      const ratio = scenePixelRatio(width, height);
+      const viewport = fitCanvasViewport(width * ratio, height * ratio, MAP_WIDTH, MAP_HEIGHT);
+      const layout = getRenderLayout(physicalRenderScale(viewport.scale, camera.k));
+      const cached = prefetchPlanCacheRef.current;
+      const plan =
+        cached?.layout === layout &&
+        cached.camera.k === camera.k &&
+        Math.abs(cached.camera.x - camera.x) <= DETAIL_PREFETCH_MARGIN / 2 &&
+        Math.abs(cached.camera.y - camera.y) <= DETAIL_PREFETCH_MARGIN / 2
+          ? cached.plan
+          : buildRenderPlanFromLayout(layout, {
+              camera,
+              spriteAtlasFailed,
+              marginX: DETAIL_PREFETCH_MARGIN,
+              marginY: DETAIL_PREFETCH_MARGIN,
+            });
+      if (plan !== cached?.plan) {
+        prefetchPlanCacheRef.current = { layout, camera: { ...camera }, plan };
+      }
       if (plan.resourceSignature === resourceIntentSignatureRef.current) return;
       resourceIntentSignatureRef.current = plan.resourceSignature;
       void prefetchFlagResources(plan.rasterRequests, plan.svgRequests);
@@ -593,15 +698,7 @@ export function TerritoryMap({
         void preloadPrefectureSpriteAtlas(code);
       }
     },
-    [
-      fitMode,
-      focusedPrefecture,
-      flagVisualManifest,
-      motifSettings,
-      renderedFeatures,
-      spriteAtlas,
-      spriteAtlasFailed,
-    ],
+    [getRenderLayout, renderedFeatures, spriteAtlasFailed],
   );
 
   const queueCameraFrame = useCallback(() => {
@@ -652,37 +749,33 @@ export function TerritoryMap({
 
   useEffect(() => {
     const canvas = baseCanvasRef.current;
+    updateInteractionViewport();
     if (!canvas || typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(() => {
+      updateInteractionViewport();
       renderSettledRef.current();
     });
     observer.observe(canvas);
     return () => observer.disconnect();
-  }, []);
+  }, [updateInteractionViewport]);
 
   const zoom = (factor: number) => {
     setCamera(zoomCamera(cameraRef.current, factor));
   };
 
   const hitTest = (clientX: number, clientY: number) => {
-    const canvas = overlayCanvasRef.current;
-    const context = hitContextRef.current;
-    if (!canvas || !context || typeof Path2D === "undefined") return null;
-    const point = canvasPoint(canvas, clientX, clientY);
+    const hitMap = hitMapRef.current;
+    const measurement = interactionViewportRef.current ?? updateInteractionViewport();
+    if (!hitMap || !measurement) return null;
+    const point = canvasPoint(measurement, clientX, clientY);
     const camera = cameraRef.current;
     const worldX = (point.x - camera.x) / camera.k;
     const worldY = (point.y - camera.y) / camera.k;
-    for (let index = renderedFeatures.length - 1; index >= 0; index -= 1) {
-      const item = renderedFeatures[index];
-      const [[x0, y0], [x1, y1]] = item.bounds;
-      if (worldX < x0 || worldX > x1 || worldY < y0 || worldY > y1) {
-        continue;
-      }
-      if (item.canvasPath && context.isPointInPath(item.canvasPath, worldX, worldY)) {
-        return item.feature;
-      }
+    try {
+      return hitTestFeature(hitMap, worldX, worldY);
+    } catch {
+      return null;
     }
-    return null;
   };
 
   const onPointerDown = (event: ReactPointerEvent<HTMLCanvasElement>) => {
@@ -706,12 +799,9 @@ export function TerritoryMap({
       }
       return;
     }
-    const viewport = fitCanvasViewport(
-      event.currentTarget.clientWidth,
-      event.currentTarget.clientHeight,
-      MAP_WIDTH,
-      MAP_HEIGHT,
-    );
+    const viewport =
+      (interactionViewportRef.current ?? updateInteractionViewport())?.viewport ??
+      fitCanvasViewport(1, 1, MAP_WIDTH, MAP_HEIGHT);
     const scale = 1 / viewport.scale;
     const dx = event.clientX - drag.current.x;
     const dy = event.clientY - drag.current.y;

@@ -41,6 +41,18 @@ export type SceneCache = {
   motifSettingsSignature: string;
 };
 
+const BASE_CANVAS_PIXEL_BUDGET = 16 * 1024 * 1024;
+const OVERLAY_CANVAS_PIXEL_BUDGET = 8 * 1024 * 1024;
+
+export function boundedCanvasPixelRatio(
+  width: number,
+  height: number,
+  requestedRatio: number,
+  maxPixels: number,
+) {
+  return Math.min(requestedRatio, Math.sqrt(maxPixels / Math.max(1, width * height)));
+}
+
 export function createSceneCache(
   layer: MapLayer,
   fitMode: FlagFitMode,
@@ -72,11 +84,20 @@ export function resizeVisibleCanvases(
   if (!base || !overlay) return false;
   const width = Math.max(1, base.clientWidth);
   const height = Math.max(1, base.clientHeight);
-  const ratio = Math.min(window.devicePixelRatio || 1, 2);
-  const targetWidth = Math.round(width * ratio);
-  const targetHeight = Math.round(height * ratio);
   let resized = false;
-  for (const canvas of [base, overlay]) {
+  const canvases = [
+    { canvas: base, maxRatio: 2, maxPixels: BASE_CANVAS_PIXEL_BUDGET },
+    { canvas: overlay, maxRatio: 1.5, maxPixels: OVERLAY_CANVAS_PIXEL_BUDGET },
+  ];
+  for (const { canvas, maxRatio, maxPixels } of canvases) {
+    const ratio = boundedCanvasPixelRatio(
+      width,
+      height,
+      Math.min(window.devicePixelRatio || 1, maxRatio),
+      maxPixels,
+    );
+    const targetWidth = Math.max(1, Math.round(width * ratio));
+    const targetHeight = Math.max(1, Math.round(height * ratio));
     if (canvas.width !== targetWidth || canvas.height !== targetHeight) {
       canvas.width = targetWidth;
       canvas.height = targetHeight;
@@ -139,16 +160,13 @@ function flagPlacement(
   return strategy.place(width, height, item.bounds);
 }
 
-function drawClippedImage(
+function drawImage(
   context: CanvasRenderingContext2D,
-  path: Path2D,
   image: CanvasImageSource,
   placement: FlagPlacement,
   source?: SpriteEntry,
   smooth = false,
 ) {
-  context.save();
-  context.clip(path);
   if (smooth) {
     context.imageSmoothingEnabled = true;
     context.imageSmoothingQuality = "high";
@@ -168,7 +186,6 @@ function drawClippedImage(
   } else {
     context.drawImage(image, placement.x, placement.y, placement.width, placement.height);
   }
-  context.restore();
 }
 
 export function drawRenderPlanFeatures(
@@ -178,6 +195,22 @@ export function drawRenderPlanFeatures(
   spriteAtlas: SpriteAtlas | null,
 ) {
   const strategy = getFlagFitStrategy(fitMode === "motif" ? "cover" : fitMode);
+  // Keep the cheap polygon fill pass free of clip/save/restore state changes.
+  for (const planned of plan.features) {
+    const { item, hasFlag, visual, motifPlacement } = planned;
+    const path = item.canvasPath;
+    const separated =
+      fitMode === "motif" && visual?.kind === "separated" && motifPlacement !== null;
+    context.fillStyle =
+      separated && visual.background.kind === "solid"
+        ? visual.background.color
+        : hasFlag
+          ? "#ffffff"
+          : "#edf0f2";
+    context.fill(path);
+  }
+
+  // A feature uses one clip for all of its image layers (background and flag).
   for (const planned of plan.features) {
     const {
       item,
@@ -191,48 +224,63 @@ export function drawRenderPlanFeatures(
     const path = item.canvasPath;
     const separated =
       fitMode === "motif" && visual?.kind === "separated" && motifPlacement !== null;
-    const showFlag = hasFlag && resourcePath && bucket;
-    context.fillStyle =
-      separated && visual.background.kind === "solid"
-        ? visual.background.color
-        : hasFlag
-          ? "#ffffff"
-          : "#edf0f2";
-    context.fill(path);
+    const background =
+      separated && visual.background.kind === "asset"
+        ? cachedFlagSvg(visual.background.path)
+        : null;
+    const showFlag = Boolean(hasFlag && resourcePath && bucket);
 
-    if (separated && visual.background.kind === "asset") {
-      const background = cachedFlagSvg(visual.background.path);
-      if (background) {
-        const placement = getFlagFitStrategy("cover").place(
-          background.width,
-          background.height,
-          item.bounds,
-        );
-        drawClippedImage(context, path, background.image, placement);
+    let flagImage: CanvasImageSource | null = null;
+    let flagSource: SpriteEntry | undefined;
+    let flagPlacementValue: FlagPlacement | null = null;
+    let smoothFlag = false;
+
+    if (showFlag && resourcePath && bucket) {
+      const svg = useDirectSvg ? cachedFlagSvg(resourcePath) : null;
+      const raster = cachedFlagRaster(resourcePath, bucket);
+      if (svg) {
+        flagImage = svg.image;
+        flagPlacementValue = flagPlacement(planned, fitMode, strategy, svg.width, svg.height);
+        smoothFlag = true;
+      } else if (raster) {
+        flagImage = raster.bitmap;
+        flagPlacementValue = flagPlacement(planned, fitMode, strategy, raster.width, raster.height);
+      } else {
+        const prefectureAtlas =
+          bucket === 64 ? cachedPrefectureSpriteAtlas(prefectureCode(item.feature)) : null;
+        const atlas = prefectureAtlas?.sprites[resourcePath] ? prefectureAtlas : spriteAtlas;
+        const sprite = atlas?.sprites[resourcePath];
+        if (sprite && atlas) {
+          flagImage = atlas.image;
+          flagSource = sprite;
+          flagPlacementValue = flagPlacement(
+            planned,
+            fitMode,
+            strategy,
+            sprite.width,
+            sprite.height,
+          );
+          smoothFlag = true;
+        }
       }
     }
 
-    if (!showFlag || !resourcePath || !bucket) continue;
-    const svg = useDirectSvg ? cachedFlagSvg(resourcePath) : null;
-    const raster = cachedFlagRaster(resourcePath, bucket);
-    if (svg) {
-      const placement = flagPlacement(planned, fitMode, strategy, svg.width, svg.height);
-      drawClippedImage(context, path, svg.image, placement, undefined, true);
-      continue;
-    }
-    if (raster) {
-      const placement = flagPlacement(planned, fitMode, strategy, raster.width, raster.height);
-      drawClippedImage(context, path, raster.bitmap, placement);
-      continue;
-    }
+    if (!background && (!flagImage || !flagPlacementValue)) continue;
+    context.save();
+    context.clip(path);
 
-    const prefectureAtlas =
-      bucket === 64 ? cachedPrefectureSpriteAtlas(prefectureCode(item.feature)) : null;
-    const atlas = prefectureAtlas?.sprites[resourcePath] ? prefectureAtlas : spriteAtlas;
-    const sprite = atlas?.sprites[resourcePath];
-    if (!sprite || !atlas) continue;
-    const placement = flagPlacement(planned, fitMode, strategy, sprite.width, sprite.height);
-    drawClippedImage(context, path, atlas.image, placement, sprite, true);
+    if (background) {
+      const placement = getFlagFitStrategy("cover").place(
+        background.width,
+        background.height,
+        item.bounds,
+      );
+      drawImage(context, background.image, placement);
+    }
+    if (flagImage && flagPlacementValue) {
+      drawImage(context, flagImage, flagPlacementValue, flagSource, smoothFlag);
+    }
+    context.restore();
   }
 }
 

@@ -52,6 +52,8 @@ const allowedSvgs = new Set<string>();
 const prefetchedSvgs = new Set<string>();
 let activeRasterLoads = 0;
 let activeSvgLoads = 0;
+let rasterCacheBytes = 0;
+let prefectureAtlasCacheBytes = 0;
 let spriteAtlasPromise: Promise<SpriteAtlas> | null = null;
 const prefectureAtlasCache = new Map<
   string,
@@ -217,19 +219,15 @@ export function loadSpriteAtlas() {
 }
 
 function evictPrefectureAtlasCache() {
-  let totalBytes = [...prefectureAtlasCache.values()].reduce(
-    (sum, cached) => sum + cached.bytes,
-    0,
-  );
-  if (totalBytes <= MAX_PREFECTURE_ATLAS_BYTES) return;
+  if (prefectureAtlasCacheBytes <= MAX_PREFECTURE_ATLAS_BYTES) return;
   const removable = [...prefectureAtlasCache]
     .filter(([code]) => !allowedPrefectureAtlases.has(code))
     .sort((left, right) => left[1].lastUsed - right[1].lastUsed);
   for (const [code, cached] of removable) {
-    if (totalBytes <= MAX_PREFECTURE_ATLAS_BYTES) break;
+    if (prefectureAtlasCacheBytes <= MAX_PREFECTURE_ATLAS_BYTES) break;
     cached.atlas.image.src = "";
     prefectureAtlasCache.delete(code);
-    totalBytes -= cached.bytes;
+    prefectureAtlasCacheBytes -= cached.bytes;
   }
 }
 
@@ -244,11 +242,15 @@ function loadPrefectureSpriteAtlas(code: string) {
   if (pending) return pending;
   const promise = fetchSpriteAtlas(`/flags/sprites/${code}-64.json`)
     .then((atlas) => {
-      prefectureAtlasCache.set(code, {
+      const cached = {
         atlas,
         bytes: atlas.image.naturalWidth * atlas.image.naturalHeight * 4,
         lastUsed: performance.now(),
-      });
+      };
+      const previous = prefectureAtlasCache.get(code);
+      if (previous) prefectureAtlasCacheBytes -= previous.bytes;
+      prefectureAtlasCache.set(code, cached);
+      prefectureAtlasCacheBytes += cached.bytes;
       evictPrefectureAtlasCache();
       return atlas;
     })
@@ -286,16 +288,15 @@ export function cachedPrefectureSpriteAtlas(code: string) {
 }
 
 function evictRasterCache() {
-  let totalBytes = [...rasterCache.values()].reduce((sum, raster) => sum + raster.bytes, 0);
-  if (totalBytes <= MAX_RASTER_BYTES) return;
+  if (rasterCacheBytes <= MAX_RASTER_BYTES) return;
   const removable = [...rasterCache]
     .filter(([key]) => !allowedRasters.has(key) && !prefetchedRasters.has(key))
     .sort((left, right) => left[1].lastUsed - right[1].lastUsed);
   for (const [key, raster] of removable) {
-    if (totalBytes <= MAX_RASTER_BYTES) break;
+    if (rasterCacheBytes <= MAX_RASTER_BYTES) break;
     raster.bitmap.close();
     rasterCache.delete(key);
-    totalBytes -= raster.bytes;
+    rasterCacheBytes -= raster.bytes;
   }
 }
 
@@ -338,13 +339,20 @@ function pumpRasterQueue() {
         context.drawImage(image, 0, 0, width, height);
         const bitmap = await createImageBitmap(canvas);
         if (allowedRasters.has(request.key) || prefetchedRasters.has(request.key)) {
-          rasterCache.set(request.key, {
+          const cached = {
             bitmap,
             width,
             height,
             bytes: width * height * 4,
             lastUsed: performance.now(),
-          });
+          };
+          const previous = rasterCache.get(request.key);
+          if (previous) {
+            previous.bitmap.close();
+            rasterCacheBytes -= previous.bytes;
+          }
+          rasterCache.set(request.key, cached);
+          rasterCacheBytes += cached.bytes;
           evictRasterCache();
         } else {
           bitmap.close();

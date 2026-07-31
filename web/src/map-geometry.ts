@@ -1,5 +1,5 @@
 import { geoPath, type GeoContext, type GeoPath, type GeoProjection } from "d3-geo";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { startTransition, useEffect, useMemo, useRef, useState } from "react";
 import { buildMapProjection, buildMapRenderer } from "./map-model";
 import type { MapFeature, MapArcGeometry, MapArcSource, MapLayer } from "./types";
 
@@ -566,12 +566,14 @@ export function useCompiledMapScene(
       if (cancelled || compileGenerationRef.current !== generation) {
         return;
       }
-      setCompiledScene({
-        generation,
-        layer,
-        source: features,
-        renderedFeatures: renderedFeatureItems,
-        renderedBoundaries: renderedBoundaryItems,
+      startTransition(() => {
+        setCompiledScene({
+          generation,
+          layer,
+          source: features,
+          renderedFeatures: renderedFeatureItems,
+          renderedBoundaries: renderedBoundaryItems,
+        });
       });
     };
     void compile();

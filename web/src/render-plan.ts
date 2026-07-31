@@ -30,6 +30,11 @@ export type PlannedFeature = {
   motifPlacement: MotifPlacementOptions | null;
   rasterBucket: RasterBucket | null;
   useDirectSvg: boolean;
+  pixelSize: number;
+};
+
+export type RenderLayout = {
+  features: PlannedFeature[];
 };
 
 export type RenderPlan = {
@@ -52,6 +57,18 @@ export type BuildRenderPlanOptions = {
   marginY?: number;
   flagVisualManifest?: FlagVisualManifest | null;
   motifSettings?: MotifRenderSettings;
+};
+
+export type BuildRenderLayoutOptions = Omit<
+  BuildRenderPlanOptions,
+  "camera" | "marginX" | "marginY" | "spriteAtlasFailed"
+>;
+
+export type BuildRenderPlanFromLayoutOptions = {
+  camera: ViewTransform;
+  spriteAtlasFailed: boolean;
+  marginX?: number;
+  marginY?: number;
 };
 
 export function featureKey(feature: MapFeature) {
@@ -81,32 +98,20 @@ export function isVisible(
   );
 }
 
-export function buildRenderPlan({
+export function buildRenderLayout({
   items,
-  camera,
   renderScale,
   fitMode,
   spriteEntries,
   focusedPrefecture,
-  spriteAtlasFailed,
-  marginX = 0,
-  marginY = 0,
   flagVisualManifest = null,
   motifSettings = DEFAULT_MOTIF_RENDER_SETTINGS,
-}: BuildRenderPlanOptions): RenderPlan {
+}: BuildRenderLayoutOptions): RenderLayout {
   const features: PlannedFeature[] = [];
-  const candidates: Array<{
-    path: string;
-    prefectureCode: string;
-    pixelSize: number;
-    bucket: RasterBucket;
-    useDirectSvg: boolean;
-  }> = [];
   const strategy = getFlagFitStrategy(fitMode === "motif" ? "cover" : fitMode);
-  const backgroundSvgRequests = new Set<string>();
 
   for (const item of items) {
-    if (!item.canvasPath || !isVisible(item.bounds, camera, marginX, marginY)) {
+    if (!item.canvasPath) {
       continue;
     }
     const flagPath = item.feature.properties.flagPath;
@@ -118,6 +123,7 @@ export function buildRenderPlan({
     let resourcePath: string | null = flagPath;
     let visual: FlagVisualEntry | null = null;
     let motifPlacement: MotifPlacementOptions | null = null;
+    let pixelSize = 0;
 
     if (hasFlag && flagPath) {
       visual = resolveFlagVisual(flagVisualManifest, flagPath);
@@ -150,22 +156,10 @@ export function buildRenderPlan({
               item.feature.properties.visualComponentBounds,
             )
           : strategy.place(imageWidth, imageHeight, item.bounds);
-      const pixelSize = Math.max(placement.width, placement.height) * renderScale;
+      pixelSize = Math.max(placement.width, placement.height) * renderScale;
       const lod = flagRenderLod(pixelSize);
       rasterBucket = lod.rasterBucket;
       useDirectSvg = lod.useDirectSvg;
-      if (rasterBucket) {
-        candidates.push({
-          path: resourcePath,
-          prefectureCode: prefectureCode(item.feature),
-          pixelSize,
-          bucket: rasterBucket,
-          useDirectSvg,
-        });
-      }
-      if (separatedVisual?.background.kind === "asset") {
-        backgroundSvgRequests.add(separatedVisual.background.path);
-      }
     }
 
     features.push({
@@ -176,7 +170,42 @@ export function buildRenderPlan({
       motifPlacement,
       rasterBucket,
       useDirectSvg,
+      pixelSize,
     });
+  }
+
+  return { features };
+}
+
+export function buildRenderPlanFromLayout(
+  layout: RenderLayout,
+  { camera, spriteAtlasFailed, marginX = 0, marginY = 0 }: BuildRenderPlanFromLayoutOptions,
+): RenderPlan {
+  const features: PlannedFeature[] = [];
+  const candidates: Array<{
+    path: string;
+    prefectureCode: string;
+    pixelSize: number;
+    bucket: RasterBucket;
+    useDirectSvg: boolean;
+  }> = [];
+  const backgroundSvgRequests = new Set<string>();
+
+  for (const planned of layout.features) {
+    if (!isVisible(planned.item.bounds, camera, marginX, marginY)) continue;
+    features.push(planned);
+    if (planned.hasFlag && planned.resourcePath && planned.rasterBucket) {
+      candidates.push({
+        path: planned.resourcePath,
+        prefectureCode: prefectureCode(planned.item.feature),
+        pixelSize: planned.pixelSize,
+        bucket: planned.rasterBucket,
+        useDirectSvg: planned.useDirectSvg,
+      });
+    }
+    if (planned.visual?.kind === "separated" && planned.visual.background.kind === "asset") {
+      backgroundSvgRequests.add(planned.visual.background.path);
+    }
   }
 
   const rasterRequests = new Map<string, RasterRequest>();
@@ -214,4 +243,14 @@ export function buildRenderPlan({
       prefectureAtlasRequestList.join(","),
     ].join("|"),
   };
+}
+
+export function buildRenderPlan(options: BuildRenderPlanOptions): RenderPlan {
+  const { camera, spriteAtlasFailed, marginX, marginY, ...layoutOptions } = options;
+  return buildRenderPlanFromLayout(buildRenderLayout(layoutOptions), {
+    camera,
+    spriteAtlasFailed,
+    marginX,
+    marginY,
+  });
 }

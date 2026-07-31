@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { derivePrefectureFeatures } from "./map-layers";
+import { createPrefectureFeatureDeriver, derivePrefectureFeatures } from "./map-layers";
 import type { MapArcSource, PrefectureFeature, TerritoryFeature } from "./types";
 
 const source: MapArcSource = { key: "municipality:l0", arcs: [] };
@@ -80,5 +80,14 @@ describe("derivePrefectureFeatures", () => {
     expect(derived.arcGeometry?.source).toBe(source);
     expect(derived.arcGeometry?.polygons).toHaveLength(2);
     expect(derived.bbox).toEqual([0, 0, 2, 1]);
+  });
+
+  it("reuses a derived prefecture while its municipality members stay unchanged", () => {
+    const derive = createPrefectureFeatureDeriver();
+    const features = [territory("13001", 0), territory("13002", 1)];
+    const [first] = derive([prefecture], features);
+    const [second] = derive([prefecture], [...features]);
+
+    expect(second).toBe(first);
   });
 });

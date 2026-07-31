@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DetailsDrawer } from "./DetailsDrawer";
 import { CreditsDialog } from "./CreditsDialog";
 import { FlagDebugPanel } from "./FlagDebugPanel";
@@ -8,7 +8,7 @@ import { TerritoryMap } from "./TerritoryMap";
 import { preloadPrefectureSpriteAtlas } from "./flag-resources";
 import { cachedMunicipalityProfile, preloadMunicipalityProfiles } from "./municipality-profiles";
 import { decodeMapData } from "./topology";
-import { derivePrefectureFeatures } from "./map-layers";
+import { createPrefectureFeatureDeriver } from "./map-layers";
 import { detailGeometryLod, overviewGeometryLod, type GeometryLod } from "./render-scale";
 import { loadMotifRenderSettings, saveMotifRenderSettings } from "./flag-visuals";
 import { parseMapExportRequest, scopeMapFeatures } from "./map-export";
@@ -37,6 +37,7 @@ async function fetchMapData<T extends MapCollection>(
 }
 
 const MAX_RETAINED_DETAIL_CHUNKS = 8;
+const DETAIL_CHUNK_COMMIT_WINDOW_MS = 75;
 const DEFAULT_MAP_DISPLAY_OPTIONS: MapDisplayOptions = {
   autoSelectRegionOnMapClick: false,
   showMunicipalityBoundariesOnPrefectureHover: false,
@@ -58,8 +59,11 @@ export default function App() {
   >({});
   const [visibleDetailPrefectures, setVisibleDetailPrefectures] = useState<string[]>([]);
   const loadingChunks = useRef(new Set<string>());
+  const pendingChunkCommits = useRef(new Map<string, LoadedTerritoryCollection>());
+  const chunkCommitTimer = useRef<number | null>(null);
   const detailChunkLastUsed = useRef(new Map<string, number>());
   const activeDetailTargets = useRef(new Set<string>());
+  const prefectureFeatureDeriver = useRef(createPrefectureFeatureDeriver());
   const [layer, setLayer] = useState<MapLayer>(() => exportRequest?.layer ?? "municipality");
   const [fitMode, setFitMode] = useState<FlagFitMode>(() => exportRequest?.fitMode ?? "cover");
   const [displayOptions, setDisplayOptions] = useState<MapDisplayOptions>(
@@ -83,6 +87,47 @@ export default function App() {
   const [geometryLod, setGeometryLod] = useState<GeometryLod>("l0");
   const overviewLod = overviewGeometryLod(geometryLod);
   const detailLod = detailGeometryLod(geometryLod);
+  const detailLodRef = useRef(detailLod);
+  detailLodRef.current = detailLod;
+
+  const flushPendingChunks = useCallback(() => {
+    chunkCommitTimer.current = null;
+    if (!pendingChunkCommits.current.size) return;
+    const additions = Object.fromEntries(pendingChunkCommits.current);
+    pendingChunkCommits.current.clear();
+    startTransition(() => {
+      setMunicipalityChunks((current) =>
+        Object.fromEntries(
+          Object.entries({ ...current, ...additions })
+            .sort(([left], [right]) => {
+              const leftProtected = activeDetailTargets.current.has(left);
+              const rightProtected = activeDetailTargets.current.has(right);
+              if (leftProtected !== rightProtected) return leftProtected ? -1 : 1;
+              return (
+                (detailChunkLastUsed.current.get(right) ?? 0) -
+                (detailChunkLastUsed.current.get(left) ?? 0)
+              );
+            })
+            .filter(
+              ([chunkCode], index) =>
+                index < MAX_RETAINED_DETAIL_CHUNKS || activeDetailTargets.current.has(chunkCode),
+            ),
+        ),
+      );
+    });
+  }, []);
+
+  const scheduleChunkCommit = useCallback(() => {
+    if (chunkCommitTimer.current !== null) return;
+    chunkCommitTimer.current = window.setTimeout(flushPendingChunks, DETAIL_CHUNK_COMMIT_WINDOW_MS);
+  }, [flushPendingChunks]);
+
+  useEffect(
+    () => () => {
+      if (chunkCommitTimer.current !== null) window.clearTimeout(chunkCommitTimer.current);
+    },
+    [],
+  );
 
   useEffect(() => {
     saveMotifRenderSettings(motifSettings);
@@ -134,37 +179,20 @@ export default function App() {
       void preloadPrefectureSpriteAtlas(code);
       void preloadMunicipalityProfiles(code).catch(() => undefined);
       const loadKey = `${code}:${detailLod}`;
-      if (municipalityChunks[code]?.lod === detailLod || loadingChunks.current.has(loadKey)) {
+      if (
+        municipalityChunks[code]?.lod === detailLod ||
+        pendingChunkCommits.current.get(code)?.lod === detailLod ||
+        loadingChunks.current.has(loadKey)
+      ) {
         continue;
       }
       loadingChunks.current.add(loadKey);
       fetchMapData<TerritoryCollection>(`/data/territories/${code}-${detailLod}.topojson`)
         .then((chunk) => {
+          if (detailLodRef.current !== detailLod) return;
           detailChunkLastUsed.current.set(code, performance.now());
-          setMunicipalityChunks((current) => ({
-            ...Object.fromEntries(
-              Object.entries({
-                ...current,
-                [code]: { lod: detailLod, collection: chunk },
-              })
-                .sort(([left], [right]) => {
-                  const leftProtected = activeDetailTargets.current.has(left);
-                  const rightProtected = activeDetailTargets.current.has(right);
-                  if (leftProtected !== rightProtected) {
-                    return leftProtected ? -1 : 1;
-                  }
-                  return (
-                    (detailChunkLastUsed.current.get(right) ?? 0) -
-                    (detailChunkLastUsed.current.get(left) ?? 0)
-                  );
-                })
-                .filter(
-                  ([chunkCode], index) =>
-                    index < MAX_RETAINED_DETAIL_CHUNKS ||
-                    activeDetailTargets.current.has(chunkCode),
-                ),
-            ),
-          }));
+          pendingChunkCommits.current.set(code, { lod: detailLod, collection: chunk });
+          scheduleChunkCommit();
         })
         .catch(() => {
           setError(`${code}の詳細地図を読み込めませんでした`);
@@ -180,6 +208,7 @@ export default function App() {
     layer,
     municipalityChunks,
     municipalityOverview,
+    scheduleChunkCommit,
     visibleDetailPrefectures,
   ]);
 
@@ -228,7 +257,10 @@ export default function App() {
 
   const territoryFeatures = useMemo(() => {
     if (!municipalityOverview) return [];
-    const detailedCodes = new Set(Object.keys(municipalityChunks));
+    const activeChunks = Object.entries(municipalityChunks).filter(
+      ([, chunk]) => chunk.lod === detailLod,
+    );
+    const detailedCodes = new Set(activeChunks.map(([code]) => code));
     return [
       ...municipalityOverview.collection.features.filter(
         (feature) =>
@@ -236,11 +268,11 @@ export default function App() {
             feature.properties.prefectureCode ?? feature.properties.jis5.slice(0, 2),
           ),
       ),
-      ...Object.values(municipalityChunks).flatMap(({ collection }) => collection.features),
+      ...activeChunks.flatMap(([, { collection }]) => collection.features),
     ];
-  }, [municipalityChunks, municipalityOverview]);
+  }, [detailLod, municipalityChunks, municipalityOverview]);
   const prefectureFeatures = useMemo(
-    () => derivePrefectureFeatures(prefectures?.features ?? [], territoryFeatures),
+    () => prefectureFeatureDeriver.current(prefectures?.features ?? [], territoryFeatures),
     [prefectures, territoryFeatures],
   );
   const scopedTerritoryFeatures = useMemo(

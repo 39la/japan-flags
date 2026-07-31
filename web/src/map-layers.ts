@@ -40,47 +40,91 @@ function combinedArcGeometry(features: TerritoryFeature[]): MapArcGeometry | und
   };
 }
 
+function sameMembers(left: TerritoryFeature[], right: TerritoryFeature[]) {
+  return left.length === right.length && left.every((feature, index) => feature === right[index]);
+}
+
+function derivePrefectureFeature(
+  key: string,
+  template: PrefectureFeature,
+  features: TerritoryFeature[],
+) {
+  const [, regionValue] = key.split(":");
+  const region = regionValue as MapRegion;
+  return {
+    type: "Feature" as const,
+    id: key,
+    properties: {
+      ...template.properties,
+      mapRegion: region,
+      mapPart: key,
+    },
+    geometry: {
+      type: "MultiPolygon" as const,
+      coordinates: features.flatMap(polygonsOf),
+    },
+    bbox: combinedBounds(features),
+    arcGeometry: combinedArcGeometry(features),
+  };
+}
+
+export function createPrefectureFeatureDeriver() {
+  const cache = new Map<
+    string,
+    {
+      template: PrefectureFeature;
+      members: TerritoryFeature[];
+      result: PrefectureFeature;
+    }
+  >();
+
+  return (
+    prefectureMetadata: PrefectureFeature[],
+    territories: TerritoryFeature[],
+  ): PrefectureFeature[] => {
+    const templates = new Map<string, PrefectureFeature>();
+    for (const feature of prefectureMetadata) {
+      templates.set(
+        `${feature.properties.prefectureCode}:${feature.properties.mapRegion}`,
+        feature,
+      );
+    }
+    const groups = new Map<string, TerritoryFeature[]>();
+    for (const feature of territories) {
+      const code = feature.properties.prefectureCode ?? feature.properties.jis5.slice(0, 2);
+      const region = feature.properties.mapRegion;
+      const key = `${code}:${region}`;
+      const group = groups.get(key) ?? [];
+      group.push(feature);
+      groups.set(key, group);
+    }
+
+    const result: PrefectureFeature[] = [];
+    for (const [key, features] of groups) {
+      const [code] = key.split(":");
+      const template =
+        templates.get(key) ??
+        prefectureMetadata.find((feature) => feature.properties.prefectureCode === code);
+      if (!template) continue;
+      const cached = cache.get(key);
+      if (cached && cached.template === template && sameMembers(cached.members, features)) {
+        result.push(cached.result);
+        continue;
+      }
+      const derived = derivePrefectureFeature(key, template, features);
+      cache.set(key, { template, members: features, result: derived });
+      result.push(derived);
+    }
+    for (const key of cache.keys()) {
+      if (!groups.has(key)) cache.delete(key);
+    }
+    return result.sort((left, right) => String(left.id).localeCompare(String(right.id)));
+  };
+}
+
 export function derivePrefectureFeatures(
   prefectureMetadata: PrefectureFeature[],
   territories: TerritoryFeature[],
 ): PrefectureFeature[] {
-  const templates = new Map<string, PrefectureFeature>();
-  for (const feature of prefectureMetadata) {
-    templates.set(`${feature.properties.prefectureCode}:${feature.properties.mapRegion}`, feature);
-  }
-  const groups = new Map<string, TerritoryFeature[]>();
-  for (const feature of territories) {
-    const code = feature.properties.prefectureCode ?? feature.properties.jis5.slice(0, 2);
-    const region = feature.properties.mapRegion;
-    const key = `${code}:${region}`;
-    const group = groups.get(key) ?? [];
-    group.push(feature);
-    groups.set(key, group);
-  }
-
-  const result: PrefectureFeature[] = [];
-  for (const [key, features] of groups) {
-    const [code, regionValue] = key.split(":");
-    const region = regionValue as MapRegion;
-    const template =
-      templates.get(key) ??
-      prefectureMetadata.find((feature) => feature.properties.prefectureCode === code);
-    if (!template) continue;
-    result.push({
-      type: "Feature",
-      id: key,
-      properties: {
-        ...template.properties,
-        mapRegion: region,
-        mapPart: key,
-      },
-      geometry: {
-        type: "MultiPolygon",
-        coordinates: features.flatMap(polygonsOf),
-      },
-      bbox: combinedBounds(features),
-      arcGeometry: combinedArcGeometry(features),
-    });
-  }
-  return result.sort((left, right) => String(left.id).localeCompare(String(right.id)));
+  return createPrefectureFeatureDeriver()(prefectureMetadata, territories);
 }
