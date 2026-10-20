@@ -1,17 +1,27 @@
 import { geoPath, type GeoContext, type GeoPath, type GeoProjection } from "d3-geo";
+import earcut from "earcut";
 import { startTransition, useEffect, useMemo, useRef, useState } from "react";
 import { buildMapProjection, buildMapRenderer } from "./map-model";
+import { featureKey } from "./render-plan";
 import type { MapFeature, MapArcGeometry, MapArcSource, MapLayer } from "./types";
 
 export type RenderedFeature = {
   feature: MapFeature;
   canvasPath: Path2D | null;
+  webglMesh?: WebGLFeatureMesh | null;
   bounds: [[number, number], [number, number]];
+  key?: string;
+};
+
+export type WebGLFeatureMesh = {
+  vertices: Float32Array;
+  indices: Uint32Array;
 };
 
 export type RenderedBoundary = {
   source: BoundaryArcSet;
   canvasPaths: Path2D[];
+  webglLines?: Float32Array;
   bounds: [[number, number], [number, number]];
   pointCount: number;
 };
@@ -46,6 +56,7 @@ const GEOMETRY_COMPILE_SLICE_MS = 8;
 const EMPTY_RENDERED_FEATURES: RenderedFeature[] = [];
 const EMPTY_RENDERED_BOUNDARIES: RenderedBoundary[] = [];
 const MAX_BOUNDARY_PATH_POINTS = 4096;
+const MAX_COMPILE_POINTS = 2048;
 const MAX_BOUNDARY_CACHE_ENTRIES_PER_SOURCE = 4;
 let boundaryCacheClock = 0;
 
@@ -94,6 +105,17 @@ function projectedFeatureBounds(feature: MapFeature, projection: GeoProjection, 
 }
 
 type ProjectedPoint = [number, number];
+
+function samePoint(left: ProjectedPoint, right: ProjectedPoint) {
+  return left[0] === right[0] && left[1] === right[1];
+}
+
+function closeProjectedRing(points: ProjectedPoint[]) {
+  if (points.length > 1 && samePoint(points[0], points[points.length - 1])) {
+    points.pop();
+  }
+  return points.length >= 3 ? points : null;
+}
 
 export type BoundaryArcSet = {
   key: string;
@@ -175,37 +197,79 @@ export function createProjectedArcStore(
   return store;
 }
 
-function forEachArcPoint(
-  store: ProjectedArcStore,
-  arcIndex: number,
-  callback: (point: ProjectedPoint, pointIndex: number) => void,
-) {
-  const points = store.get(arcIndex);
-  if (arcIndex >= 0) {
-    for (let index = 0; index < points.length; index += 1) {
-      callback(points[index], index);
-    }
-    return;
-  }
-  for (let index = points.length - 1; index >= 0; index -= 1) {
-    callback(points[index], points.length - 1 - index);
-  }
+function projectedTopologyRings(feature: MapFeature, projection: GeoProjection) {
+  const geometry = feature.arcGeometry;
+  if (!geometry) return null;
+  const store = createProjectedArcStore(geometry.source, projection);
+  return geometry.polygons
+    .map((polygon) =>
+      polygon
+        .map((ring) => {
+          const points: ProjectedPoint[] = [];
+          for (const reference of ring) {
+            const arc = store.get(reference);
+            const ordered = reference >= 0 ? arc : [...arc].reverse();
+            for (let index = 0; index < ordered.length; index += 1) {
+              if (points.length && index === 0) continue;
+              points.push(ordered[index]);
+            }
+          }
+          return closeProjectedRing(points);
+        })
+        .filter((ring): ring is ProjectedPoint[] => ring !== null),
+    )
+    .filter((polygon) => polygon.length > 0);
 }
 
-function appendRing(path: Path2D, ring: number[], store: ProjectedArcStore) {
-  let started = false;
-  for (const arcIndex of ring) {
-    forEachArcPoint(store, arcIndex, ([x, y], pointIndex) => {
-      if (started && pointIndex === 0) return;
-      if (!started) {
-        path.moveTo(x, y);
-        started = true;
-      } else {
-        path.lineTo(x, y);
-      }
-    });
+function projectedGeoJsonRings(feature: MapFeature, projection: GeoProjection) {
+  const projectRing = (coordinates: number[][]) =>
+    closeProjectedRing(
+      coordinates
+        .map(([longitude, latitude]) => projection([longitude, latitude]))
+        .filter((point): point is ProjectedPoint => point !== null),
+    );
+  if (feature.geometry.type === "Polygon") {
+    return [feature.geometry.coordinates.map(projectRing).filter(isProjectedRing)];
   }
-  if (started) path.closePath();
+  return feature.geometry.coordinates.map((polygon) =>
+    polygon.map(projectRing).filter(isProjectedRing),
+  );
+}
+
+function isProjectedRing(ring: ProjectedPoint[] | null): ring is ProjectedPoint[] {
+  return ring !== null;
+}
+
+export function buildWebGLFeatureMesh(
+  feature: MapFeature,
+  projection: GeoProjection,
+): WebGLFeatureMesh | null {
+  const polygons = feature.arcGeometry
+    ? projectedTopologyRings(feature, projection)
+    : projectedGeoJsonRings(feature, projection);
+  if (!polygons) return null;
+
+  const vertices: number[] = [];
+  const indices: number[] = [];
+  for (const polygon of polygons) {
+    if (!polygon.length || !polygon[0]) continue;
+    const flat: number[] = [];
+    const holes: number[] = [];
+    for (const ring of polygon) {
+      if (flat.length) holes.push(flat.length / 2);
+      for (const [x, y] of ring) flat.push(x, y);
+    }
+    if (flat.length < 6) continue;
+    const triangles = earcut(flat, holes, 2);
+    const vertexOffset = vertices.length / 2;
+    vertices.push(...flat);
+    for (const index of triangles) indices.push(vertexOffset + index);
+  }
+  if (!indices.length) return null;
+  return {
+    vertices: new Float32Array(vertices),
+    indices: new Uint32Array(indices),
+  };
 }
 
 function mapFeatureSignature(feature: MapFeature) {
@@ -328,9 +392,11 @@ export function createRenderedBoundaryCompiler(
 ): RenderedBoundaryCompiler {
   const store = createProjectedArcStore(source.source, projection);
   const canvasPaths: Path2D[] = [];
+  const webglLines: number[] = [];
   let activeCanvasPath: Path2D | null = null;
   let activeCanvasPointCount = 0;
   let arcIndex = 0;
+  let pointIndex = 0;
   let pointCount = 0;
   let completed: RenderedBoundary | null = null;
   const bounds: [[number, number], [number, number]] = [
@@ -342,6 +408,7 @@ export function createRenderedBoundaryCompiler(
     const item: RenderedBoundary = {
       source,
       canvasPaths,
+      webglLines: new Float32Array(webglLines),
       bounds: hasBounds
         ? bounds
         : [
@@ -358,33 +425,42 @@ export function createRenderedBoundaryCompiler(
     next: () => {
       if (completed) return completed;
       if (!source.arcIndexes.length) return finish();
-      const points = store.get(source.arcIndexes[arcIndex]);
-      pointCount += points.length;
-      if (typeof Path2D !== "undefined" && points.length >= 2) {
-        let startIndex = 0;
-        while (startIndex < points.length - 1) {
+      let processed = 0;
+      while (arcIndex < source.arcIndexes.length && processed < MAX_COMPILE_POINTS) {
+        const points = store.get(source.arcIndexes[arcIndex]);
+        if (pointIndex >= points.length) {
+          arcIndex += 1;
+          pointIndex = 0;
+          continue;
+        }
+        const [x, y] = points[pointIndex];
+        if (pointIndex > 0) {
+          const previousIndex =
+            source.arcIndexes[arcIndex] >= 0 ? pointIndex - 1 : points.length - pointIndex;
+          const previous = points[previousIndex];
+          if (previous) webglLines.push(previous[0], previous[1], x, y);
+        }
+        if (typeof Path2D !== "undefined" && points.length >= 2) {
           if (!activeCanvasPath || activeCanvasPointCount >= MAX_BOUNDARY_PATH_POINTS) {
             activeCanvasPath = new Path2D();
             canvasPaths.push(activeCanvasPath);
             activeCanvasPointCount = 0;
+            activeCanvasPath.moveTo(x, y);
+          } else if (pointIndex === 0) {
+            activeCanvasPath.moveTo(x, y);
+          } else {
+            activeCanvasPath.lineTo(x, y);
           }
-          const available = Math.max(2, MAX_BOUNDARY_PATH_POINTS - activeCanvasPointCount);
-          const endIndex = Math.min(points.length, startIndex + available);
-          activeCanvasPath.moveTo(points[startIndex][0], points[startIndex][1]);
-          for (let index = startIndex + 1; index < endIndex; index += 1) {
-            activeCanvasPath.lineTo(points[index][0], points[index][1]);
-          }
-          activeCanvasPointCount += endIndex - startIndex;
-          startIndex = endIndex - 1;
+          activeCanvasPointCount += 1;
         }
-      }
-      for (const [x, y] of points) {
         bounds[0][0] = Math.min(bounds[0][0], x);
         bounds[0][1] = Math.min(bounds[0][1], y);
         bounds[1][0] = Math.max(bounds[1][0], x);
         bounds[1][1] = Math.max(bounds[1][1], y);
+        pointIndex += 1;
+        pointCount += 1;
+        processed += 1;
       }
-      arcIndex += 1;
       return arcIndex === source.arcIndexes.length ? finish() : null;
     },
   };
@@ -423,12 +499,17 @@ export function createRenderedFeatureCompiler(
         }))
       : [feature.geometry];
   let geometryIndex = 0;
+  let ringArcIndex = 0;
+  let ringPointIndex = 0;
+  let ringStarted = false;
   let completed: RenderedFeature | null = null;
   const finish = () => {
     const item: RenderedFeature = {
       feature,
       canvasPath,
+      webglMesh: buildWebGLFeatureMesh(feature, projection),
       bounds: projectedFeatureBounds(feature, projection, path),
+      key: featureKey(feature),
     };
     cache.set(feature, { projection, item });
     completed = item;
@@ -440,8 +521,37 @@ export function createRenderedFeatureCompiler(
       if (completed) return completed;
       if (canvasPath && topologyRings && projectedStore) {
         if (!topologyRings.length) return finish();
-        appendRing(canvasPath, topologyRings[geometryIndex], projectedStore);
-        geometryIndex += 1;
+        let processed = 0;
+        while (geometryIndex < topologyRings.length && processed < MAX_COMPILE_POINTS) {
+          const ring = topologyRings[geometryIndex];
+          if (ringArcIndex >= ring.length) {
+            if (ringStarted) canvasPath.closePath();
+            geometryIndex += 1;
+            ringArcIndex = 0;
+            ringPointIndex = 0;
+            ringStarted = false;
+            continue;
+          }
+          const arcIndex = ring[ringArcIndex];
+          const points = projectedStore.get(arcIndex);
+          if (ringPointIndex >= points.length) {
+            ringArcIndex += 1;
+            ringPointIndex = 0;
+            continue;
+          }
+          const sourceIndex = arcIndex >= 0 ? ringPointIndex : points.length - 1 - ringPointIndex;
+          const [x, y] = points[sourceIndex];
+          if (!(ringStarted && ringPointIndex === 0)) {
+            if (!ringStarted) {
+              canvasPath.moveTo(x, y);
+              ringStarted = true;
+            } else {
+              canvasPath.lineTo(x, y);
+            }
+          }
+          ringPointIndex += 1;
+          processed += 1;
+        }
         return geometryIndex === topologyRings.length ? finish() : null;
       }
       if (!canvasRenderer || !geometries.length) return finish();
@@ -456,6 +566,7 @@ export function useCompiledMapScene(
   features: MapFeature[],
   layer: MapLayer,
   sharedProjection: GeoProjection | null = null,
+  compileFeatures = true,
 ) {
   const projectionRef = useRef<NonNullable<ReturnType<typeof buildMapProjection>> | null>(null);
   const featureCacheRef = useRef<RenderedFeatureCache>(new WeakMap());
@@ -495,9 +606,16 @@ export function useCompiledMapScene(
       return;
     }
     let cancelled = false;
-    const featureCompilers = renderer.features.map((feature) => ({
-      compiler: createRenderedFeatureCompiler(feature, renderer.path, renderer.projection, cache),
-    }));
+    const featureCompilers = compileFeatures
+      ? renderer.features.map((feature) => ({
+          compiler: createRenderedFeatureCompiler(
+            feature,
+            renderer.path,
+            renderer.projection,
+            cache,
+          ),
+        }))
+      : [];
     const boundaryGroups = collectBoundarySourceGroups(features);
     const boundaryTasks = boundaryGroups.map((group) => {
       const cached = cachedRenderedBoundaries(boundaryCacheRef.current, group, renderer.projection);
@@ -580,7 +698,7 @@ export function useCompiledMapScene(
     return () => {
       cancelled = true;
     };
-  }, [features, layer, renderer]);
+  }, [compileFeatures, features, layer, renderer]);
 
   return {
     renderedFeatures:

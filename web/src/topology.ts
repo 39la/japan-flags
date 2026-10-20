@@ -86,6 +86,33 @@ function decodeArcs(topology: MapTopology) {
   });
 }
 
+async function decodeArcsAsync(topology: MapTopology) {
+  const transform = topology.transform;
+  const arcs: Array<Array<[number, number]>> = [];
+  let pointCount = 0;
+  for (const arc of topology.arcs) {
+    let x = 0;
+    let y = 0;
+    const decoded: Array<[number, number]> = [];
+    for (const position of arc) {
+      if (transform) {
+        x += position[0];
+        y += position[1];
+        decoded.push([
+          x * transform.scale[0] + transform.translate[0],
+          y * transform.scale[1] + transform.translate[1],
+        ]);
+      } else {
+        decoded.push([position[0], position[1]]);
+      }
+      pointCount += 1;
+      if (pointCount % 4096 === 0) await nextFrame();
+    }
+    arcs.push(decoded);
+  }
+  return arcs;
+}
+
 function stitchRing(references: number[], source: MapArcSource): Position[] {
   const ring: Position[] = [];
   for (const reference of references) {
@@ -192,6 +219,118 @@ export function decodeMapData(payload: unknown): MapCollection {
       arcGeometry: arcGeometry(topologyGeometry, decodedGeometry, source),
     } as MapFeature;
   });
+  return {
+    type: "FeatureCollection",
+    bbox: topology.bbox,
+    features,
+    metadata: topology.metadata,
+  } as MapCollection;
+}
+
+function nextFrame() {
+  return new Promise<void>((resolve) => {
+    if (typeof window !== "undefined" && window.requestAnimationFrame) {
+      window.requestAnimationFrame(() => resolve());
+    } else {
+      setTimeout(resolve, 0);
+    }
+  });
+}
+
+async function stitchRingAsync(references: number[], source: MapArcSource): Promise<Position[]> {
+  const ring: Position[] = [];
+  let pointCount = 0;
+  for (const reference of references) {
+    const arcIndex = reference < 0 ? ~reference : reference;
+    const arc = source.arcs[arcIndex];
+    if (!arc) throw new Error(`Invalid territory arc index: ${arcIndex}`);
+    if (reference >= 0) {
+      for (let index = ring.length ? 1 : 0; index < arc.length; index += 1) {
+        ring.push(arc[index]);
+        pointCount += 1;
+        if (pointCount % 4096 === 0) await nextFrame();
+      }
+    } else {
+      for (let index = arc.length - 1 - (ring.length ? 1 : 0); index >= 0; index -= 1) {
+        ring.push(arc[index]);
+        pointCount += 1;
+        if (pointCount % 4096 === 0) await nextFrame();
+      }
+    }
+  }
+  return ring;
+}
+
+async function decodeGeometryAsync(
+  geometry: PolygonArcGeometry,
+  source: MapArcSource,
+): Promise<TerritoryGeometry> {
+  if (geometry.type === "Polygon") {
+    const coordinates = [];
+    for (const ring of geometry.arcs) coordinates.push(await stitchRingAsync(ring, source));
+    return { type: "Polygon", coordinates };
+  }
+  const coordinates = [];
+  for (const polygon of geometry.arcs) {
+    const rings = [];
+    for (const ring of polygon) rings.push(await stitchRingAsync(ring, source));
+    coordinates.push(rings);
+  }
+  return { type: "MultiPolygon", coordinates };
+}
+
+/**
+ * Decode large topology payloads in cooperative slices. JSON.parse remains
+ * synchronous at the fetch boundary, but geometry expansion no longer blocks
+ * the main thread for the full feature set in one task.
+ */
+export async function decodeMapDataAsync(payload: unknown): Promise<MapCollection> {
+  if (
+    payload &&
+    typeof payload === "object" &&
+    "type" in payload &&
+    payload.type === "FeatureCollection"
+  ) {
+    return payload as MapCollection;
+  }
+  if (
+    !payload ||
+    typeof payload !== "object" ||
+    !("type" in payload) ||
+    payload.type !== "Topology" ||
+    !("objects" in payload) ||
+    !("metadata" in payload)
+  ) {
+    throw new Error("Invalid territory map payload");
+  }
+  const topology = payload as MapTopology;
+  const object = topology.objects.territories;
+  if (!object) throw new Error("Topology object 'territories' is missing");
+  const source: MapArcSource = {
+    key: [
+      topology.metadata.mapLayer ?? "municipality",
+      topology.metadata.detailLevel ?? "overview",
+      topology.metadata.prefectureCode ?? "all",
+    ].join(":"),
+    arcs: await decodeArcsAsync(topology),
+  };
+  const features: MapFeature[] = [];
+  for (let index = 0; index < object.geometries.length; index += 1) {
+    const topologyGeometry = object.geometries[index] as PolygonArcGeometry | undefined;
+    if (topologyGeometry?.type !== "Polygon" && topologyGeometry?.type !== "MultiPolygon") {
+      throw new Error("Unsupported map geometry");
+    }
+    const decodedGeometry = await decodeGeometryAsync(topologyGeometry, source);
+    features.push({
+      type: "Feature",
+      id: topologyGeometry.id,
+      bbox: topologyGeometry.bbox,
+      properties: topologyGeometry.properties as MapProperties,
+      geometry: orientForD3(decodedGeometry),
+      arcGeometry: arcGeometry(topologyGeometry, decodedGeometry, source),
+    } as MapFeature);
+    if ((index + 1) % 16 === 0) await nextFrame();
+  }
   return {
     type: "FeatureCollection",
     bbox: topology.bbox,

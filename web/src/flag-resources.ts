@@ -106,6 +106,15 @@ function evictSvgCache() {
   const removable = [...svgCache]
     .filter(([path]) => !allowedSvgs.has(path) && !prefetchedSvgs.has(path))
     .sort((left, right) => left[1].lastUsed - right[1].lastUsed);
+  // A large visible batch must not disable the cache limit. If all entries are
+  // currently wanted, evict the oldest wanted entries as a last resort.
+  if (removable.length < svgCache.size - MAX_SVG_CACHE_ENTRIES) {
+    removable.push(
+      ...[...svgCache]
+        .filter(([path]) => allowedSvgs.has(path) || prefetchedSvgs.has(path))
+        .sort((left, right) => left[1].lastUsed - right[1].lastUsed),
+    );
+  }
   for (const [path, cached] of removable) {
     if (svgCache.size <= MAX_SVG_CACHE_ENTRIES) break;
     cached.image.src = "";
@@ -173,11 +182,15 @@ function queueFlagSvg(path: string) {
 }
 
 function requestFlagSvgs(paths: string[], activate: boolean) {
+  // Keep one active batch bounded as well as the retained cache. Direct SVGs
+  // always have a raster request in the same render plan, so skipped entries
+  // continue to use the raster/atlas fallback.
+  const selectedPaths = paths.slice(0, MAX_SVG_CACHE_ENTRIES);
   const wanted = activate ? allowedSvgs : prefetchedSvgs;
   wanted.clear();
-  for (const path of paths) wanted.add(path);
+  for (const path of selectedPaths) wanted.add(path);
   const pending: Promise<boolean>[] = [];
-  for (const path of paths) {
+  for (const path of selectedPaths) {
     if (svgCache.has(path) || failedSvgs.has(path)) continue;
     pending.push(queueFlagSvg(path));
   }
@@ -292,6 +305,11 @@ function evictRasterCache() {
   const removable = [...rasterCache]
     .filter(([key]) => !allowedRasters.has(key) && !prefetchedRasters.has(key))
     .sort((left, right) => left[1].lastUsed - right[1].lastUsed);
+  removable.push(
+    ...[...rasterCache]
+      .filter(([key]) => allowedRasters.has(key) || prefetchedRasters.has(key))
+      .sort((left, right) => left[1].lastUsed - right[1].lastUsed),
+  );
   for (const [key, raster] of removable) {
     if (rasterCacheBytes <= MAX_RASTER_BYTES) break;
     raster.bitmap.close();

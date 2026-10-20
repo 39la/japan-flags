@@ -5,6 +5,7 @@ import {
   cachedRenderedBoundaries,
   cacheRenderedBoundaries,
   createProjectedArcStore,
+  buildWebGLFeatureMesh,
   createRenderedBoundaryCompiler,
   createRenderedFeatureCompiler,
   type RenderedFeature,
@@ -153,6 +154,37 @@ describe("createRenderedFeatureCompiler", () => {
     expect(multipartCompiler.next()).not.toBeNull();
     expect(pathInstances).toHaveLength(6);
   });
+
+  it("triangulates polygons with holes for the WebGL renderer", () => {
+    const donut = {
+      ...feature("13103"),
+      geometry: {
+        type: "Polygon" as const,
+        coordinates: [
+          [
+            [139, 35],
+            [139, 36],
+            [140, 36],
+            [140, 35],
+            [139, 35],
+          ],
+          [
+            [139.3, 35.3],
+            [139.3, 35.7],
+            [139.7, 35.7],
+            [139.7, 35.3],
+            [139.3, 35.3],
+          ],
+        ],
+      },
+    } as MapFeature;
+    const mesh = buildWebGLFeatureMesh(donut, geoMercator().scale(100).translate([0, 0]));
+
+    expect(mesh).not.toBeNull();
+    if (!mesh) return;
+    expect(mesh.indices.length).toBeGreaterThan(0);
+    expect(mesh.indices.every((index) => index < mesh.vertices.length / 2)).toBe(true);
+  });
 });
 
 describe("shared TopoJSON arcs", () => {
@@ -256,6 +288,47 @@ describe("shared TopoJSON arcs", () => {
     for (const coordinate of featureCoordinates) {
       expect(boundaryCoordinates).toContainEqual(coordinate);
     }
+  });
+
+  it("keeps independent boundary arcs separated", () => {
+    const commands: Array<[string, number?, number?]> = [];
+    class FakePath2D {
+      moveTo(x: number, y: number) {
+        commands.push(["moveTo", x, y]);
+      }
+      lineTo(x: number, y: number) {
+        commands.push(["lineTo", x, y]);
+      }
+      closePath() {
+        commands.push(["closePath"]);
+      }
+    }
+    vi.stubGlobal("Path2D", FakePath2D);
+    const source: MapArcSource = {
+      key: "municipality:overview:all",
+      arcs: [
+        [
+          [139, 35],
+          [139.1, 35],
+        ],
+        [
+          [140, 36],
+          [140.1, 36],
+        ],
+      ],
+    };
+    const projection = geoMercator().scale(100).translate([0, 0]);
+    const compiler = createRenderedBoundaryCompiler(
+      { key: "source:13", prefectureCode: "13", source, arcIndexes: [0, 1] },
+      projection,
+    );
+    let renderedBoundary = compiler.next();
+    while (!renderedBoundary) {
+      renderedBoundary = compiler.next();
+    }
+
+    expect(commands.filter(([command]) => command === "moveTo")).toHaveLength(2);
+    expect(renderedBoundary.pointCount).toBe(4);
   });
 
   it("omits municipality-internal shared arcs from prefecture boundaries", () => {

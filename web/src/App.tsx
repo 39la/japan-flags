@@ -7,7 +7,7 @@ import { SearchBox } from "./SearchBox";
 import { TerritoryMap } from "./TerritoryMap";
 import { preloadPrefectureSpriteAtlas } from "./flag-resources";
 import { cachedMunicipalityProfile, preloadMunicipalityProfiles } from "./municipality-profiles";
-import { decodeMapData } from "./topology";
+import { decodeMapDataAsync } from "./topology";
 import { createPrefectureFeatureDeriver } from "./map-layers";
 import { detailGeometryLod, overviewGeometryLod, type GeometryLod } from "./render-scale";
 import { loadMotifRenderSettings, saveMotifRenderSettings } from "./flag-visuals";
@@ -33,7 +33,7 @@ async function fetchMapData<T extends MapCollection>(
   path: string,
   signal?: AbortSignal,
 ): Promise<T> {
-  return decodeMapData(await fetchJson<unknown>(path, signal)) as T;
+  return (await decodeMapDataAsync(await fetchJson<unknown>(path, signal))) as T;
 }
 
 const MAX_RETAINED_DETAIL_CHUNKS = 8;

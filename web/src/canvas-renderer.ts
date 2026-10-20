@@ -12,7 +12,7 @@ import {
   type SpriteEntry,
   type SpriteAtlas,
 } from "./flag-resources";
-import { featureIsSelected, nationalView } from "./map-camera";
+import { nationalView } from "./map-camera";
 import type { RenderedBoundary, RenderedFeature } from "./map-geometry";
 import { MAP_HEIGHT, MAP_WIDTH } from "./map-model";
 import {
@@ -41,18 +41,6 @@ export type SceneCache = {
   motifSettingsSignature: string;
 };
 
-const BASE_CANVAS_PIXEL_BUDGET = 16 * 1024 * 1024;
-const OVERLAY_CANVAS_PIXEL_BUDGET = 8 * 1024 * 1024;
-
-export function boundedCanvasPixelRatio(
-  width: number,
-  height: number,
-  requestedRatio: number,
-  maxPixels: number,
-) {
-  return Math.min(requestedRatio, Math.sqrt(maxPixels / Math.max(1, width * height)));
-}
-
 export function createSceneCache(
   layer: MapLayer,
   fitMode: FlagFitMode,
@@ -80,24 +68,17 @@ export function createSceneCache(
 export function resizeVisibleCanvases(
   base: HTMLCanvasElement | null,
   overlay: HTMLCanvasElement | null,
+  webgl: HTMLCanvasElement | null = null,
 ) {
   if (!base || !overlay) return false;
   const width = Math.max(1, base.clientWidth);
   const height = Math.max(1, base.clientHeight);
+  const ratio = window.devicePixelRatio || 1;
+  const targetWidth = Math.max(1, Math.round(width * ratio));
+  const targetHeight = Math.max(1, Math.round(height * ratio));
   let resized = false;
-  const canvases = [
-    { canvas: base, maxRatio: 2, maxPixels: BASE_CANVAS_PIXEL_BUDGET },
-    { canvas: overlay, maxRatio: 1.5, maxPixels: OVERLAY_CANVAS_PIXEL_BUDGET },
-  ];
-  for (const { canvas, maxRatio, maxPixels } of canvases) {
-    const ratio = boundedCanvasPixelRatio(
-      width,
-      height,
-      Math.min(window.devicePixelRatio || 1, maxRatio),
-      maxPixels,
-    );
-    const targetWidth = Math.max(1, Math.round(width * ratio));
-    const targetHeight = Math.max(1, Math.round(height * ratio));
+  for (const canvas of [base, overlay, webgl]) {
+    if (!canvas) continue;
     if (canvas.width !== targetWidth || canvas.height !== targetHeight) {
       canvas.width = targetWidth;
       canvas.height = targetHeight;
@@ -125,7 +106,7 @@ export function drawCachedScene(
   context.translate(translateX, translateY);
   context.scale(cameraScale, cameraScale);
   context.imageSmoothingEnabled = true;
-  context.imageSmoothingQuality = "high";
+  context.imageSmoothingQuality = cameraScale === 1 ? "high" : "low";
   context.drawImage(
     cache.canvas,
     -cache.marginX,
@@ -193,21 +174,24 @@ export function drawRenderPlanFeatures(
   plan: RenderPlan,
   fitMode: FlagFitMode,
   spriteAtlas: SpriteAtlas | null,
+  options: { fillPolygons?: boolean } = {},
 ) {
   const strategy = getFlagFitStrategy(fitMode === "motif" ? "cover" : fitMode);
   // Keep the cheap polygon fill pass free of clip/save/restore state changes.
-  for (const planned of plan.features) {
-    const { item, hasFlag, visual, motifPlacement } = planned;
-    const path = item.canvasPath;
-    const separated =
-      fitMode === "motif" && visual?.kind === "separated" && motifPlacement !== null;
-    context.fillStyle =
-      separated && visual.background.kind === "solid"
-        ? visual.background.color
-        : hasFlag
-          ? "#ffffff"
-          : "#edf0f2";
-    context.fill(path);
+  if (options.fillPolygons !== false) {
+    for (const planned of plan.features) {
+      const { item, hasFlag, visual, motifPlacement } = planned;
+      const path = item.canvasPath;
+      const separated =
+        fitMode === "motif" && visual?.kind === "separated" && motifPlacement !== null;
+      context.fillStyle =
+        separated && visual.background.kind === "solid"
+          ? visual.background.color
+          : hasFlag
+            ? "#ffffff"
+            : "#edf0f2";
+      context.fill(path);
+    }
   }
 
   // A feature uses one clip for all of its image layers (background and flag).
@@ -361,9 +345,18 @@ export function drawMapOverlay({
     strokeBoundaryLayer(context, municipalityBoundaries, camera, "#68737a", 0.72);
   }
 
+  const selectedKey = selected ? featureKey(selected) : null;
+  const hoveredKey = hovered ? featureKey(hovered) : null;
+  const selectedIsPrefecture = selected?.properties.entityType === "prefecture";
   for (const item of renderedFeatures) {
-    const selectedFeature = featureIsSelected(item.feature, selected);
-    const hoveredFeature = hovered && featureKey(item.feature) === featureKey(hovered);
+    const itemKey = item.key ?? featureKey(item.feature);
+    const itemIsPrefecture = item.feature.properties.entityType === "prefecture";
+    const selectedFeature = selected
+      ? itemIsPrefecture && selectedIsPrefecture
+        ? item.feature.properties.prefectureCode === selected.properties.prefectureCode
+        : itemKey === selectedKey
+      : false;
+    const hoveredFeature = hoveredKey !== null && itemKey === hoveredKey;
     if (
       (!selectedFeature && !hoveredFeature) ||
       !item.canvasPath ||
