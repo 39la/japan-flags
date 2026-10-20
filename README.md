@@ -32,6 +32,8 @@ mise run generate
 mise run dev       # Vite開発サーバー
 mise run check     # Python/Webのformat、lint、型検査、test
 mise run build     # 既存生成物からproduction build
+mise run data:fetch-sources         # 外部ソース取得 → SQLite照合
+mise run data:fetch-sources-refresh # 取得キャッシュを無視して全ソースを再取得
 mise run generate  # データexport → 旗asset生成 → 静的検証
 mise run render:maps # Canvas地図を全国・地方・都道府県別画像へ出力
 mise run deploy       # 検証後Cloudflare Workers Static Assetsへデプロイ
@@ -57,6 +59,7 @@ data/derived/           比較・検査用の派生データ
 docs/architecture/      現在の設計
 docs/operations/        セットアップ・更新・計測手順
 docs/decisions/         重要な設計判断
+scripts/                外部ソース取得などの運用スクリプト
 .mise/tasks/            責務別のmiseタスク
 ```
 

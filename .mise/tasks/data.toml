@@ -1,3 +1,11 @@
+["data:fetch-sources"]
+description = "Fetch and ingest every external source in dependency order"
+run = "scripts/fetch-sources.sh {{vars.snapshot_date}}"
+
+["data:fetch-sources-refresh"]
+description = "Re-fetch every external source, bypassing acquisition caches"
+run = "scripts/fetch-sources.sh {{vars.snapshot_date}} --refresh"
+
 ["data:ingest-miyazaki"]
 description = "Ingest the Miyazaki Commons SVG and N03 boundary pilot"
 run = """
