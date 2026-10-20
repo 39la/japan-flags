@@ -18,6 +18,15 @@ web/vite.config.d.ts
 web/.wrangler/
 .dev.vars*
 web/.dev.vars*
+web/bench/pixi/node_modules/
+web/bench/pixi/dist/
+web/bench/pixi/.vite/
+web/bench/pixi/*.tsbuildinfo
+# Baked basemap is generated, but we want the SVG committed
+# so dev servers work without running `mise run bench:bake-basemap`
+# first. Future bakes overwrite it.
 /data
 /docs
 web/public
+!web/bench/pixi/public/maps/japan-basemap.svg
+!web/bench/pixi/public/maps/japan-basemap.json

@@ -1,0 +1,9 @@
+{
+  "nodeModulesDir": "auto",
+  "imports": {
+    "@preact/preset-vite": "npm:@preact/preset-vite@^2.10.6",
+    "preact": "npm:preact@^10.29.7",
+    "preact/": "npm:/preact@^10.25.4/",
+    "pixi.js": "npm:pixi.js@^8.8.1"
+  }
+}

@@ -1,0 +1,37 @@
+["bench:install"]
+description = "Install PIXI bench dependencies with Deno"
+dir = "web/bench/pixi"
+run = "deno install --allow-scripts"
+
+["bench:check"]
+description = "Type-check the PIXI bench app"
+dir = "web/bench/pixi"
+run = "deno check src/*.ts src/*.tsx"
+
+["bench:dev"]
+description = "Start the PIXI bench dev server on port 5174"
+depends = ["bench:preflight", "bench:check"]
+dir = "web/bench/pixi"
+run = "deno run -A npm:vite"
+
+["bench:build"]
+description = "Build the PIXI bench app"
+depends = ["bench:preflight", "bench:check"]
+dir = "web/bench/pixi"
+run = "deno run -A npm:vite build"
+
+["bench:preflight"]
+description = "Check that the baked basemap SVG exists"
+run = "test -f web/bench/pixi/public/maps/japan-basemap.svg || { echo 'Baked basemap is missing; run: mise run bench:bake-basemap' >&2; exit 1; }"
+
+["bench:bake-basemap"]
+description = "Bake a single national SVG for the PIXI bench"
+depends = ["web:build"]
+dir = "web"
+run = "deno run -A scripts/bake-basemap.ts"
+
+["bench:bake-basemap-force"]
+description = "Force re-bake of the PIXI bench basemap"
+depends = ["web:build"]
+dir = "web"
+run = "deno run -A scripts/bake-basemap.ts --force"

@@ -24,6 +24,7 @@ run = """
 mise run data:export
 mise run assets:build
 mise run data:validate
+mise run bench:bake-basemap
 """
 
 [ci]

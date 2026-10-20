@@ -13,4 +13,5 @@ includes = [
   ".mise/tasks/python.toml",
   ".mise/tasks/data.toml",
   ".mise/tasks/web.toml",
+  ".mise/tasks/bench.toml",
 ]

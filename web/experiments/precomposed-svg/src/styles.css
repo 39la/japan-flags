@@ -1,0 +1,387 @@
+:root {
+  font-family: Inter, "Noto Sans JP", "Hiragino Sans", "Yu Gothic UI", Meiryo, sans-serif;
+  color: #202326;
+  background: #e9eef1;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  min-width: 320px;
+  height: 100%;
+  margin: 0;
+}
+
+button {
+  font: inherit;
+}
+
+.experiment-app {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  min-height: 100%;
+  background: #f4f8fa;
+}
+
+.app-header {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  min-height: 72px;
+  padding: 12px 24px;
+  border-bottom: 1px solid #ccd2d7;
+  background: #ffffff;
+}
+
+.app-header h1 {
+  margin: 0;
+  font-size: 19px;
+  line-height: 1.3;
+  letter-spacing: 0.01em;
+}
+
+.app-header p {
+  margin: 4px 0 0;
+  color: #626970;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.header-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #626970;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #b6bec4;
+}
+
+.status-dot.is-ready {
+  background: #24834e;
+}
+
+.workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  min-height: 0;
+}
+
+.map-stage {
+  position: relative;
+  min-width: 0;
+  min-height: 540px;
+  overflow: hidden;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  background-color: #f4f8fa;
+  background-image:
+    linear-gradient(#dfe7ec 1px, transparent 1px),
+    linear-gradient(90deg, #dfe7ec 1px, transparent 1px);
+  background-size: 36px 36px;
+}
+
+.map-stage:active {
+  cursor: grabbing;
+}
+
+.precomposed-image-host,
+.precomposed-canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.precomposed-image-host {
+  pointer-events: none;
+}
+
+.precomposed-image-host .precomposed-map {
+  display: block;
+  width: 100%;
+  height: 100%;
+  transform-origin: center center;
+  will-change: transform;
+  pointer-events: none;
+}
+
+.precomposed-canvas {
+  pointer-events: none;
+}
+
+.loading-map {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: #626970;
+  font-size: 13px;
+}
+
+.map-hint {
+  position: absolute;
+  top: 16px;
+  left: 16px;
+  padding: 7px 10px;
+  border: 1px solid rgb(204 210 215 / 80%);
+  border-radius: 5px;
+  color: #626970;
+  background: rgb(255 255 255 / 90%);
+  font-size: 11px;
+  pointer-events: none;
+}
+
+.zoom-controls {
+  position: absolute;
+  right: 16px;
+  bottom: 16px;
+  display: grid;
+  overflow: hidden;
+  border: 1px solid #bbc3c9;
+  border-radius: 6px;
+  background: #ffffff;
+}
+
+.zoom-controls button {
+  min-width: 44px;
+  height: 38px;
+  padding: 0 10px;
+  border: 0;
+  border-bottom: 1px solid #d7dde1;
+  color: #202326;
+  background: #ffffff;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.zoom-controls button:first-child,
+.zoom-controls button:nth-child(2) {
+  font-size: 22px;
+}
+
+.zoom-controls button:last-child {
+  border-bottom: 0;
+}
+
+.zoom-controls button:hover:not(:disabled) {
+  background: #f1f4f6;
+}
+
+.control-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  min-height: 0;
+  overflow: auto;
+  border-left: 1px solid #ccd2d7;
+  background: #ffffff;
+}
+
+.control-panel section {
+  padding: 20px;
+  border-bottom: 1px solid #dde2e5;
+}
+
+.control-panel h2 {
+  margin: 0 0 12px;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.section-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.section-heading h2 {
+  margin-bottom: 12px;
+}
+
+.section-heading span {
+  color: #7a8288;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.segmented-control {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  overflow: hidden;
+  border: 1px solid #aeb6bc;
+  border-radius: 5px;
+}
+
+.segmented-control button {
+  min-height: 36px;
+  padding: 7px 8px;
+  border: 0;
+  border-right: 1px solid #aeb6bc;
+  color: #4d555b;
+  background: #ffffff;
+  font-size: 11px;
+  line-height: 1.25;
+  cursor: pointer;
+}
+
+.segmented-control button:last-child {
+  border-right: 0;
+}
+
+.segmented-control button.is-active {
+  color: #ffffff;
+  background: #202326;
+}
+
+.segmented-control button:disabled,
+.zoom-controls button:disabled,
+.benchmark-button:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+.metrics-list,
+.metrics-grid {
+  margin: 0;
+}
+
+.metrics-list > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 31px;
+  border-bottom: 1px solid #edf0f2;
+}
+
+.metrics-list > div:last-child {
+  border-bottom: 0;
+}
+
+.metrics-list dt,
+.metrics-grid dt {
+  color: #687078;
+  font-size: 11px;
+}
+
+.metrics-list dd,
+.metrics-grid dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.metrics-list dd {
+  font-size: 12px;
+}
+
+.benchmark-button {
+  width: 100%;
+  min-height: 40px;
+  padding: 8px 12px;
+  border: 1px solid #b8211a;
+  border-radius: 5px;
+  color: #ffffff;
+  background: #d3261d;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.benchmark-button:hover:not(:disabled) {
+  background: #b8211a;
+}
+
+.metrics-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1px;
+  margin-top: 12px;
+  background: #dde2e5;
+}
+
+.metrics-grid > div {
+  padding: 10px;
+  background: #f7f9fa;
+}
+
+.metrics-grid dd {
+  margin-top: 4px;
+  font-size: 17px;
+}
+
+.benchmark-note,
+.experiment-note {
+  color: #687078;
+  font-size: 10px;
+  line-height: 1.55;
+}
+
+.benchmark-note {
+  margin: 10px 0 0;
+}
+
+.experiment-note {
+  margin: auto 0 0;
+  padding: 20px;
+}
+
+button:focus-visible,
+.map-stage:focus-visible {
+  outline: 2px solid #d3261d;
+  outline-offset: 2px;
+}
+
+@media (max-width: 820px) {
+  .experiment-app {
+    display: block;
+  }
+
+  .app-header {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 8px;
+    padding: 14px 16px;
+  }
+
+  .header-status {
+    white-space: normal;
+  }
+
+  .workspace {
+    display: block;
+  }
+
+  .map-stage {
+    min-height: 58vh;
+  }
+
+  .control-panel {
+    border-top: 1px solid #ccd2d7;
+    border-left: 0;
+  }
+
+  .experiment-note {
+    margin-top: 0;
+  }
+}
