@@ -1,3 +1,4 @@
+import { yieldToBrowser } from "./browser-scheduling";
 import { geoPath, type GeoContext, type GeoPath, type GeoProjection } from "d3-geo";
 import earcut from "earcut";
 import { startTransition, useEffect, useMemo, useRef, useState } from "react";
@@ -13,14 +14,26 @@ export type RenderedFeature = {
   key?: string;
 };
 
+export type WebGLMeshChunk = {
+  bounds: [[number, number], [number, number]];
+  indexCount: number;
+};
+
 export type WebGLFeatureMesh = {
   vertices: Float32Array;
   indices: Uint32Array;
+  chunks: WebGLMeshChunk[];
+};
+
+export type RenderedBoundaryChunk = {
+  canvasPath: Path2D | null;
+  bounds: [[number, number], [number, number]];
+  vertexCount: number;
 };
 
 export type RenderedBoundary = {
   source: BoundaryArcSet;
-  canvasPaths: Path2D[];
+  chunks: RenderedBoundaryChunk[];
   webglLines?: Float32Array;
   bounds: [[number, number], [number, number]];
   pointCount: number;
@@ -59,18 +72,6 @@ const MAX_BOUNDARY_PATH_POINTS = 4096;
 const MAX_COMPILE_POINTS = 2048;
 const MAX_BOUNDARY_CACHE_ENTRIES_PER_SOURCE = 4;
 let boundaryCacheClock = 0;
-
-function yieldToBrowser() {
-  const scheduler = (
-    window as Window & {
-      scheduler?: { yield?: () => Promise<void> };
-    }
-  ).scheduler;
-  if (scheduler?.yield) return scheduler.yield();
-  return new Promise<void>((resolve) => {
-    window.requestAnimationFrame(() => resolve());
-  });
-}
 
 function projectedFeatureBounds(feature: MapFeature, projection: GeoProjection, path: GeoPath) {
   const bbox = feature.bbox;
@@ -251,6 +252,7 @@ export function buildWebGLFeatureMesh(
 
   const vertices: number[] = [];
   const indices: number[] = [];
+  const chunks: WebGLMeshChunk[] = [];
   for (const polygon of polygons) {
     if (!polygon.length || !polygon[0]) continue;
     const flat: number[] = [];
@@ -262,13 +264,27 @@ export function buildWebGLFeatureMesh(
     if (flat.length < 6) continue;
     const triangles = earcut(flat, holes, 2);
     const vertexOffset = vertices.length / 2;
-    vertices.push(...flat);
+    const bounds: WebGLMeshChunk["bounds"] = [
+      [Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY],
+      [Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY],
+    ];
+    for (let offset = 0; offset < flat.length; offset += 2) {
+      const x = flat[offset];
+      const y = flat[offset + 1];
+      vertices.push(x, y);
+      bounds[0][0] = Math.min(bounds[0][0], x);
+      bounds[0][1] = Math.min(bounds[0][1], y);
+      bounds[1][0] = Math.max(bounds[1][0], x);
+      bounds[1][1] = Math.max(bounds[1][1], y);
+    }
     for (const index of triangles) indices.push(vertexOffset + index);
+    if (triangles.length) chunks.push({ bounds, indexCount: triangles.length });
   }
   if (!indices.length) return null;
   return {
     vertices: new Float32Array(vertices),
     indices: new Uint32Array(indices),
+    chunks,
   };
 }
 
@@ -391,34 +407,42 @@ export function createRenderedBoundaryCompiler(
   projection: GeoProjection,
 ): RenderedBoundaryCompiler {
   const store = createProjectedArcStore(source.source, projection);
-  const canvasPaths: Path2D[] = [];
+  const chunks: RenderedBoundaryChunk[] = [];
   const webglLines: number[] = [];
-  let activeCanvasPath: Path2D | null = null;
-  let activeCanvasPointCount = 0;
+  let activeChunk: RenderedBoundaryChunk | null = null;
+  let activePointCount = 0;
   let arcIndex = 0;
   let pointIndex = 0;
   let pointCount = 0;
   let completed: RenderedBoundary | null = null;
-  const bounds: [[number, number], [number, number]] = [
-    [Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY],
-    [Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY],
-  ];
+  const extendBounds = (bounds: RenderedBoundary["bounds"], [x, y]: ProjectedPoint) => {
+    bounds[0][0] = Math.min(bounds[0][0], x);
+    bounds[0][1] = Math.min(bounds[0][1], y);
+    bounds[1][0] = Math.max(bounds[1][0], x);
+    bounds[1][1] = Math.max(bounds[1][1], y);
+  };
   const finish = () => {
-    const hasBounds = Number.isFinite(bounds[0][0]);
-    const item: RenderedBoundary = {
+    const bounds: RenderedBoundary["bounds"] = chunks.length
+      ? [
+          [Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY],
+          [Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY],
+        ]
+      : [
+          [0, 0],
+          [0, 0],
+        ];
+    for (const chunk of chunks) {
+      extendBounds(bounds, chunk.bounds[0]);
+      extendBounds(bounds, chunk.bounds[1]);
+    }
+    completed = {
       source,
-      canvasPaths,
+      chunks,
       webglLines: new Float32Array(webglLines),
-      bounds: hasBounds
-        ? bounds
-        : [
-            [0, 0],
-            [0, 0],
-          ],
+      bounds,
       pointCount,
     };
-    completed = item;
-    return item;
+    return completed;
   };
   return {
     compiled: true,
@@ -433,30 +457,34 @@ export function createRenderedBoundaryCompiler(
           pointIndex = 0;
           continue;
         }
-        const [x, y] = points[pointIndex];
-        if (pointIndex > 0) {
-          const previousIndex =
-            source.arcIndexes[arcIndex] >= 0 ? pointIndex - 1 : points.length - pointIndex;
-          const previous = points[previousIndex];
-          if (previous) webglLines.push(previous[0], previous[1], x, y);
-        }
-        if (typeof Path2D !== "undefined" && points.length >= 2) {
-          if (!activeCanvasPath || activeCanvasPointCount >= MAX_BOUNDARY_PATH_POINTS) {
-            activeCanvasPath = new Path2D();
-            canvasPaths.push(activeCanvasPath);
-            activeCanvasPointCount = 0;
-            activeCanvasPath.moveTo(x, y);
-          } else if (pointIndex === 0) {
-            activeCanvasPath.moveTo(x, y);
-          } else {
-            activeCanvasPath.lineTo(x, y);
+        const point = points[pointIndex];
+        const previous = pointIndex > 0 ? points[pointIndex - 1] : null;
+        if (!activeChunk || activePointCount >= MAX_BOUNDARY_PATH_POINTS) {
+          activeChunk = {
+            canvasPath: typeof Path2D === "undefined" ? null : new Path2D(),
+            bounds: [
+              [Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY],
+              [Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY],
+            ],
+            vertexCount: 0,
+          };
+          chunks.push(activeChunk);
+          activePointCount = 0;
+          if (previous) {
+            // 分割点の直前の点を含め、CanvasとGPUの両方で線分を欠かさない。
+            activeChunk.canvasPath?.moveTo(previous[0], previous[1]);
+            extendBounds(activeChunk.bounds, previous);
           }
-          activeCanvasPointCount += 1;
         }
-        bounds[0][0] = Math.min(bounds[0][0], x);
-        bounds[0][1] = Math.min(bounds[0][1], y);
-        bounds[1][0] = Math.max(bounds[1][0], x);
-        bounds[1][1] = Math.max(bounds[1][1], y);
+        if (previous) {
+          webglLines.push(previous[0], previous[1], point[0], point[1]);
+          activeChunk.vertexCount += 2;
+          activeChunk.canvasPath?.lineTo(point[0], point[1]);
+        } else if (points.length >= 2) {
+          activeChunk.canvasPath?.moveTo(point[0], point[1]);
+        }
+        extendBounds(activeChunk.bounds, point);
+        activePointCount += 1;
         pointIndex += 1;
         pointCount += 1;
         processed += 1;

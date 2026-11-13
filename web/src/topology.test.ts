@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { collectBoundaryArcSets } from "./map-geometry";
-import { decodeMapData, decodeTerritoryData } from "./topology";
+import { decodeMapData, decodeMapDataAsync, decodeTerritoryData } from "./topology";
 
 describe("decodeTerritoryData", () => {
   it("uses the same shared-arc contract for prefectures", () => {
@@ -300,5 +300,59 @@ describe("decodeTerritoryData", () => {
     expect(boundaries).toHaveLength(1);
     expect(boundaries[0].prefectureCode).toBe("99");
     expect(boundaries[0].arcIndexes).toEqual([0, 1, 2, 3]);
+  });
+});
+
+describe("decodeMapDataAsync scheduling", () => {
+  const payload = {
+    type: "Topology",
+    arcs: [
+      [
+        [0, 0],
+        [0, 1],
+        [1, 1],
+        [1, 0],
+        [0, 0],
+      ],
+    ],
+    objects: {
+      territories: {
+        type: "GeometryCollection",
+        geometries: Array.from({ length: 16 }, (_, id) => ({
+          type: "Polygon",
+          id,
+          arcs: [[0]],
+          properties: { territoryVersionId: id },
+        })),
+      },
+    },
+    metadata: { snapshotDate: "20260101" },
+  };
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("yields without waiting for a display frame when the scheduler is available", async () => {
+    const yieldTask = vi.fn(() => Promise.resolve());
+    const frame = vi.fn();
+    vi.stubGlobal("scheduler", { yield: yieldTask });
+    vi.stubGlobal("requestAnimationFrame", frame);
+
+    expect(await decodeMapDataAsync(payload)).toEqual(decodeMapData(payload));
+    expect(yieldTask).toHaveBeenCalledOnce();
+    expect(frame).not.toHaveBeenCalled();
+  });
+
+  it("keeps the animation-frame fallback without scheduler.yield", async () => {
+    const frame = vi.fn((callback: FrameRequestCallback) => {
+      queueMicrotask(() => callback(0));
+      return 1;
+    });
+    vi.stubGlobal("scheduler", undefined);
+    vi.stubGlobal("requestAnimationFrame", frame);
+
+    expect(await decodeMapDataAsync(payload)).toEqual(decodeMapData(payload));
+    expect(frame).toHaveBeenCalledOnce();
   });
 });

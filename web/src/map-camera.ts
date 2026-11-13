@@ -1,4 +1,5 @@
 import { focusBounds, MAP_HEIGHT, MAP_WIDTH } from "./map-model";
+import { fitCanvasViewport } from "./canvas-viewport";
 import { featureKey } from "./render-plan";
 import type { RenderedFeature } from "./map-geometry";
 import type { MapFeature, MapLayer, ViewTransform } from "./types";
@@ -25,21 +26,26 @@ export function sceneCacheContainsViewport(
   camera: ViewTransform,
   visiblePixelWidth: number,
   visiblePixelHeight: number,
+  allowScaling = false,
 ) {
   if (
-    camera.k !== cache.camera.k ||
+    (!allowScaling && camera.k !== cache.camera.k) ||
     visiblePixelWidth !== cache.visiblePixelWidth ||
     visiblePixelHeight !== cache.visiblePixelHeight
   ) {
     return false;
   }
-  const oldScreenOffsetX = cache.camera.x - camera.x;
-  const oldScreenOffsetY = cache.camera.y - camera.y;
+  const viewport = fitCanvasViewport(visiblePixelWidth, visiblePixelHeight, MAP_WIDTH, MAP_HEIGHT);
+  const scale = camera.k / cache.camera.k;
+  const x = camera.x - scale * cache.camera.x;
+  const y = camera.y - scale * cache.camera.y;
+  const marginX = viewport.offsetX / viewport.scale;
+  const marginY = viewport.offsetY / viewport.scale;
   return (
-    oldScreenOffsetX >= -cache.marginX &&
-    oldScreenOffsetX <= cache.marginX &&
-    oldScreenOffsetY >= -cache.marginY &&
-    oldScreenOffsetY <= cache.marginY
+    x - scale * cache.marginX <= -marginX + 0.000001 &&
+    x + scale * (MAP_WIDTH + cache.marginX) >= MAP_WIDTH + marginX - 0.000001 &&
+    y - scale * cache.marginY <= -marginY + 0.000001 &&
+    y + scale * (MAP_HEIGHT + cache.marginY) >= MAP_HEIGHT + marginY - 0.000001
   );
 }
 

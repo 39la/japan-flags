@@ -1,3 +1,4 @@
+import { yieldToBrowser } from "./browser-scheduling";
 import type { GeometryCollection, Topology } from "topojson-specification";
 import type { BBox, Position } from "geojson";
 import type {
@@ -106,7 +107,7 @@ async function decodeArcsAsync(topology: MapTopology) {
         decoded.push([position[0], position[1]]);
       }
       pointCount += 1;
-      if (pointCount % 4096 === 0) await nextFrame();
+      if (pointCount % 4096 === 0) await yieldToBrowser();
     }
     arcs.push(decoded);
   }
@@ -227,16 +228,6 @@ export function decodeMapData(payload: unknown): MapCollection {
   } as MapCollection;
 }
 
-function nextFrame() {
-  return new Promise<void>((resolve) => {
-    if (typeof window !== "undefined" && window.requestAnimationFrame) {
-      window.requestAnimationFrame(() => resolve());
-    } else {
-      setTimeout(resolve, 0);
-    }
-  });
-}
-
 async function stitchRingAsync(references: number[], source: MapArcSource): Promise<Position[]> {
   const ring: Position[] = [];
   let pointCount = 0;
@@ -248,13 +239,13 @@ async function stitchRingAsync(references: number[], source: MapArcSource): Prom
       for (let index = ring.length ? 1 : 0; index < arc.length; index += 1) {
         ring.push(arc[index]);
         pointCount += 1;
-        if (pointCount % 4096 === 0) await nextFrame();
+        if (pointCount % 4096 === 0) await yieldToBrowser();
       }
     } else {
       for (let index = arc.length - 1 - (ring.length ? 1 : 0); index >= 0; index -= 1) {
         ring.push(arc[index]);
         pointCount += 1;
-        if (pointCount % 4096 === 0) await nextFrame();
+        if (pointCount % 4096 === 0) await yieldToBrowser();
       }
     }
   }
@@ -329,7 +320,7 @@ export async function decodeMapDataAsync(payload: unknown): Promise<MapCollectio
       geometry: orientForD3(decodedGeometry),
       arcGeometry: arcGeometry(topologyGeometry, decodedGeometry, source),
     } as MapFeature);
-    if ((index + 1) % 16 === 0) await nextFrame();
+    if ((index + 1) % 16 === 0) await yieldToBrowser();
   }
   return {
     type: "FeatureCollection",

@@ -1,10 +1,15 @@
-import { fitCanvasViewport } from "./canvas-viewport";
-import type { RenderedBoundary } from "./map-geometry";
+import { fitCanvasViewport, type FittedViewport } from "./canvas-viewport";
+import type { RenderedBoundary, RenderedBoundaryChunk, WebGLMeshChunk } from "./map-geometry";
 import { MAP_HEIGHT, MAP_WIDTH } from "./map-model";
-import type { PlannedFeature } from "./render-plan";
+import { isVisible, type PlannedFeature } from "./render-plan";
 import type { ViewTransform } from "./types";
 
 type WebGLSceneFeature = Pick<PlannedFeature, "item" | "hasFlag" | "visual" | "motifPlacement">;
+
+type WebGLSceneInput = {
+  features: WebGLSceneFeature[];
+  boundaries: RenderedBoundary[];
+};
 
 type WebGLScene = {
   positions: Float32Array;
@@ -14,8 +19,9 @@ type WebGLScene = {
 };
 
 export type WebGLMapRenderer = {
+  maxSize: number;
   setScene: (features: WebGLSceneFeature[], boundaries: RenderedBoundary[]) => void;
-  draw: (camera: ViewTransform) => void;
+  draw: (camera: ViewTransform, viewport?: FittedViewport) => void;
   dispose: () => void;
 };
 
@@ -72,33 +78,86 @@ function featureColor(feature: WebGLSceneFeature) {
     feature.visual?.kind === "separated" && feature.motifPlacement
       ? feature.visual.background
       : null;
-  if (background?.kind === "solid") return parseColor(background.color);
-  return parseColor(feature.hasFlag ? "#ffffff" : "#edf0f2");
+  if (background?.kind === "solid") return background.color;
+  return feature.hasFlag ? "#ffffff" : "#edf0f2";
 }
 
-function combineScene(features: WebGLSceneFeature[], boundaries: RenderedBoundary[]): WebGLScene {
-  const positions: number[] = [];
-  const colors: number[] = [];
-  const indices: number[] = [];
-  const linePositions: number[] = [];
+export function combineScene(
+  features: WebGLSceneFeature[],
+  boundaries: RenderedBoundary[],
+): WebGLScene {
+  let vertexCount = 0;
+  let indexCount = 0;
+  for (const { item } of features) {
+    if (!item.webglMesh) continue;
+    vertexCount += item.webglMesh.vertices.length / 2;
+    indexCount += item.webglMesh.indices.length;
+  }
+  const positions = new Float32Array(vertexCount * 2);
+  const colors = new Float32Array(vertexCount * 4);
+  const indices = new Uint32Array(indexCount);
+  const linePositions = new Float32Array(
+    boundaries.reduce((count, boundary) => count + (boundary.webglLines?.length ?? 0), 0),
+  );
+  let vertexOffset = 0;
+  let indexOffset = 0;
   for (const feature of features) {
     const mesh = feature.item.webglMesh;
     if (!mesh) continue;
-    const vertexOffset = positions.length / 2;
-    const color = featureColor(feature);
-    positions.push(...mesh.vertices);
-    for (let index = 0; index < mesh.vertices.length / 2; index += 1) colors.push(...color);
-    for (const index of mesh.indices) indices.push(vertexOffset + index);
+    positions.set(mesh.vertices, vertexOffset * 2);
+    const color = parseColor(featureColor(feature));
+    for (let index = 0; index < mesh.vertices.length / 2; index += 1) {
+      colors.set(color, (vertexOffset + index) * 4);
+    }
+    for (const index of mesh.indices) indices[indexOffset++] = vertexOffset + index;
+    vertexOffset += mesh.vertices.length / 2;
   }
-  for (const boundary of boundaries) {
-    if (boundary.webglLines) linePositions.push(...boundary.webglLines);
+  let lineOffset = 0;
+  for (const { webglLines } of boundaries) {
+    if (!webglLines) continue;
+    linePositions.set(webglLines, lineOffset);
+    lineOffset += webglLines.length;
   }
-  return {
-    positions: new Float32Array(positions),
-    colors: new Float32Array(colors),
-    indices: new Uint32Array(indices),
-    linePositions: new Float32Array(linePositions),
-  };
+  return { positions, colors, indices, linePositions };
+}
+
+export function sameSceneInput(previous: WebGLSceneInput | null, current: WebGLSceneInput) {
+  return (
+    previous !== null &&
+    previous.features.length === current.features.length &&
+    previous.boundaries.length === current.boundaries.length &&
+    previous.features.every(
+      (feature, index) =>
+        feature.item === current.features[index].item &&
+        featureColor(feature) === featureColor(current.features[index]),
+    ) &&
+    previous.boundaries.every((boundary, index) => boundary === current.boundaries[index])
+  );
+}
+
+export function visibleDrawRanges<T extends Pick<RenderedBoundary, "bounds">>(
+  items: T[],
+  camera: ViewTransform,
+  countFor: (item: T) => number,
+  viewport: FittedViewport,
+) {
+  const marginX = (viewport.offsetX + 1) / viewport.scale;
+  const marginY = (viewport.offsetY + 1) / viewport.scale;
+  const ranges: Array<{ start: number; count: number }> = [];
+  let offset = 0;
+  for (const item of items) {
+    const count = countFor(item);
+    if (count && isVisible(item.bounds, camera, marginX, marginY)) {
+      const previous = ranges.at(-1);
+      if (previous && previous.start + previous.count === offset) {
+        previous.count += count;
+      } else {
+        ranges.push({ start: offset, count });
+      }
+    }
+    offset += count;
+  }
+  return ranges;
 }
 
 function createProgram(gl: WebGL2RenderingContext) {
@@ -135,16 +194,20 @@ export function createWebGLMapRenderer(canvas: HTMLCanvasElement): WebGLMapRende
     const viewportLocation = gl.getUniformLocation(program, "u_viewport");
     const offsetLocation = gl.getUniformLocation(program, "u_offset");
     const cameraLocation = gl.getUniformLocation(program, "u_camera");
-    let scene: WebGLScene = {
-      positions: new Float32Array(),
-      colors: new Float32Array(),
-      indices: new Uint32Array(),
-      linePositions: new Float32Array(),
-    };
+    let currentScene:
+      | (WebGLSceneInput & { fillChunks: WebGLMeshChunk[]; lineChunks: RenderedBoundaryChunk[] })
+      | null = null;
 
     return {
+      maxSize: Math.min(
+        gl.getParameter(gl.MAX_RENDERBUFFER_SIZE),
+        gl.getParameter(gl.MAX_TEXTURE_SIZE),
+        ...gl.getParameter(gl.MAX_VIEWPORT_DIMS),
+      ),
       setScene: (features, boundaries) => {
-        scene = combineScene(features, boundaries);
+        const input = { features, boundaries };
+        if (sameSceneInput(currentScene, input)) return;
+        const scene = combineScene(features, boundaries);
         gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
         gl.bufferData(gl.ARRAY_BUFFER, scene.positions, gl.STATIC_DRAW);
         gl.bindBuffer(gl.ARRAY_BUFFER, colorBuffer);
@@ -153,11 +216,17 @@ export function createWebGLMapRenderer(canvas: HTMLCanvasElement): WebGLMapRende
         gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, scene.indices, gl.STATIC_DRAW);
         gl.bindBuffer(gl.ARRAY_BUFFER, lineBuffer);
         gl.bufferData(gl.ARRAY_BUFFER, scene.linePositions, gl.STATIC_DRAW);
+        currentScene = {
+          ...input,
+          fillChunks: features.flatMap(({ item }) => item.webglMesh?.chunks ?? []),
+          lineChunks: boundaries.flatMap((boundary) => boundary.chunks),
+        };
       },
-      draw: (camera) => {
+      draw: (camera, cachedViewport) => {
+        if (!currentScene) return;
         const width = Math.max(1, canvas.width);
         const height = Math.max(1, canvas.height);
-        const viewport = fitCanvasViewport(width, height, MAP_WIDTH, MAP_HEIGHT);
+        const viewport = cachedViewport ?? fitCanvasViewport(width, height, MAP_WIDTH, MAP_HEIGHT);
         gl.viewport(0, 0, width, height);
         gl.clearColor(0, 0, 0, 0);
         gl.clear(gl.COLOR_BUFFER_BIT);
@@ -172,14 +241,32 @@ export function createWebGLMapRenderer(canvas: HTMLCanvasElement): WebGLMapRende
         gl.enableVertexAttribArray(colorLocation);
         gl.vertexAttribPointer(colorLocation, 4, gl.FLOAT, false, 0, 0);
         gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
-        if (scene.indices.length)
-          gl.drawElements(gl.TRIANGLES, scene.indices.length, gl.UNSIGNED_INT, 0);
-        if (scene.linePositions.length) {
+        for (const { start, count } of visibleDrawRanges(
+          currentScene.fillChunks,
+          camera,
+          (chunk) => chunk.indexCount,
+          viewport,
+        )) {
+          gl.drawElements(
+            gl.TRIANGLES,
+            count,
+            gl.UNSIGNED_INT,
+            start * Uint32Array.BYTES_PER_ELEMENT,
+          );
+        }
+        if (currentScene.boundaries.length) {
           gl.bindBuffer(gl.ARRAY_BUFFER, lineBuffer);
           gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0);
           gl.disableVertexAttribArray(colorLocation);
           gl.vertexAttrib4f(colorLocation, 0.682, 0.714, 0.737, 1);
-          gl.drawArrays(gl.LINES, 0, scene.linePositions.length / 2);
+          for (const { start, count } of visibleDrawRanges(
+            currentScene.lineChunks,
+            camera,
+            (chunk) => chunk.vertexCount,
+            viewport,
+          )) {
+            gl.drawArrays(gl.LINES, start, count);
+          }
           gl.enableVertexAttribArray(colorLocation);
         }
       },

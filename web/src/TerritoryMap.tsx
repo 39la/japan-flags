@@ -12,6 +12,7 @@ import {
   createSceneCache,
   drawCachedScene,
   drawMapOverlay,
+  drawPrefectureBoundaries,
   drawRenderPlanFeatures,
   drawSceneBoundaries,
   resizeVisibleCanvases,
@@ -165,6 +166,10 @@ export function TerritoryMap({
     projection,
     false,
   );
+  const staticPrefectureBoundaries =
+    layer === "municipality" && displayOptions.showPrefectureBoundaries
+      ? prefectureOverlayBoundaries
+      : null;
   const [spriteAtlas, setSpriteAtlas] = useState<SpriteAtlas | null>(null);
   const [spriteAtlasFailed, setSpriteAtlasFailed] = useState(false);
   const [spriteAtlasSettled, setSpriteAtlasSettled] = useState(false);
@@ -175,7 +180,6 @@ export function TerritoryMap({
   const webglCanvasRef = useRef<HTMLCanvasElement>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
   const webglRendererRef = useRef<WebGLMapRenderer | null>(null);
-  const webglSceneSignatureRef = useRef("");
   const sceneCacheRef = useRef<SceneCache | null>(null);
   const hitMapRef = useRef<FeatureHitMap | null>(null);
   const interactionViewportRef = useRef<InteractionViewport | null>(null);
@@ -229,7 +233,6 @@ export function TerritoryMap({
       resourceBatchGenerationRef.current += 1;
       webglRendererRef.current?.dispose();
       webglRendererRef.current = null;
-      webglSceneSignatureRef.current = "";
       sceneCacheRef.current = null;
       hitMapRef.current = null;
     };
@@ -424,11 +427,7 @@ export function TerritoryMap({
   );
 
   const ensureVisibleCanvasSizes = useCallback(() => {
-    return resizeVisibleCanvases(
-      baseCanvasRef.current,
-      overlayCanvasRef.current,
-      webglCanvasRef.current,
-    );
+    return resizeVisibleCanvases(baseCanvasRef.current, overlayCanvasRef.current);
   }, []);
 
   const renderVectorScene = useCallback(
@@ -446,9 +445,23 @@ export function TerritoryMap({
       const width = Math.max(1, visibleCanvas.clientWidth);
       const height = Math.max(1, visibleCanvas.clientHeight);
       const ratio = scenePixelRatio();
-      const viewport = fitCanvasViewport(width * ratio, height * ratio, MAP_WIDTH, MAP_HEIGHT);
-      const marginX = ((SCENE_OVERSCAN - 1) * MAP_WIDTH) / 2;
-      const marginY = ((SCENE_OVERSCAN - 1) * MAP_HEIGHT) / 2;
+      const viewport = fitCanvasViewport(
+        visibleCanvas.width,
+        visibleCanvas.height,
+        MAP_WIDTH,
+        MAP_HEIGHT,
+      );
+      const maxSize = webglRendererRef.current?.maxSize ?? Number.POSITIVE_INFINITY;
+      const paddingX = Math.min(
+        Math.round(((SCENE_OVERSCAN - 1) * MAP_WIDTH * viewport.scale) / 2),
+        Math.max(0, Math.floor((maxSize - visibleCanvas.width) / 2)),
+      );
+      const paddingY = Math.min(
+        Math.round(((SCENE_OVERSCAN - 1) * MAP_HEIGHT * viewport.scale) / 2),
+        Math.max(0, Math.floor((maxSize - visibleCanvas.height) / 2)),
+      );
+      const marginX = (viewport.offsetX + paddingX) / viewport.scale;
+      const marginY = (viewport.offsetY + paddingY) / viewport.scale;
       const logicalWidth = MAP_WIDTH + marginX * 2;
       const logicalHeight = MAP_HEIGHT + marginY * 2;
       const targetWidth = Math.max(1, Math.round(logicalWidth * viewport.scale));
@@ -505,15 +518,17 @@ export function TerritoryMap({
 
       const webglRenderer = webglRendererRef.current;
       if (webglRenderer) {
-        const webglSceneSignature = `${fitMode}|${motifSettingsSignature}|${plan.features
-          .map((item) => item.item.key ?? featureKey(item.item.feature))
-          .join(",")}`;
-        if (webglSceneSignatureRef.current !== webglSceneSignature) {
-          webglRenderer.setScene(plan.features, renderedBoundaries);
-          webglSceneSignatureRef.current = webglSceneSignature;
+        if (webglCanvas) {
+          if (webglCanvas.width !== targetWidth) webglCanvas.width = targetWidth;
+          if (webglCanvas.height !== targetHeight) webglCanvas.height = targetHeight;
         }
-        // Keep flags and boundary strokes on the existing Canvas layer. The
-        // expensive polygon fill is handled by the GPU below.
+        webglRenderer.setScene(plan.features, renderedBoundaries);
+        webglRenderer.draw(camera, {
+          ...viewport,
+          offsetX: marginX * viewport.scale,
+          offsetY: marginY * viewport.scale,
+        });
+        // GPUと旗は同じoverscan・cameraを共有し、操作中は合成だけを行う。
         drawRenderPlanFeatures(context, plan, fitMode, spriteAtlas, { fillPolygons: false });
       } else {
         drawRenderPlanFeatures(context, plan, fitMode, spriteAtlas);
@@ -522,6 +537,10 @@ export function TerritoryMap({
         drawSceneBoundaries(context, renderedBoundaries, camera, marginX, marginY);
       }
 
+      if (staticPrefectureBoundaries) {
+        drawPrefectureBoundaries(context, staticPrefectureBoundaries, camera, marginX, marginY);
+      }
+      cache.prefectureBoundaries = staticPrefectureBoundaries;
       cache.camera = { ...camera };
       cache.marginX = marginX;
       cache.marginY = marginY;
@@ -544,6 +563,7 @@ export function TerritoryMap({
       layer,
       motifSettingsSignature,
       renderedBoundaries,
+      staticPrefectureBoundaries,
       sceneGeneration,
       spriteAtlas,
       spriteAtlasFailed,
@@ -571,7 +591,19 @@ export function TerritoryMap({
     const cache = sceneCacheRef.current;
     if (!canvas || !cache || !cache.canvas.width) return;
     ensureVisibleCanvasSizes();
-    webglRendererRef.current?.draw(cameraRef.current);
+    const webglCanvas = webglCanvasRef.current;
+    if (webglCanvas && webglRendererRef.current) {
+      const viewport = fitCanvasViewport(canvas.width, canvas.height, MAP_WIDTH, MAP_HEIGHT);
+      const camera = cameraRef.current;
+      const scale = camera.k / cache.camera.k;
+      const x = camera.x - scale * (cache.camera.x + cache.marginX);
+      const y = camera.y - scale * (cache.camera.y + cache.marginY);
+      const ratio = window.devicePixelRatio || 1;
+      webglCanvas.style.width = `${webglCanvas.width / ratio}px`;
+      webglCanvas.style.height = `${webglCanvas.height / ratio}px`;
+      webglCanvas.style.transformOrigin = "0 0";
+      webglCanvas.style.transform = `translate(${(viewport.offsetX + x * viewport.scale) / ratio}px, ${(viewport.offsetY + y * viewport.scale) / ratio}px) scale(${scale})`;
+    }
     drawCachedScene(canvas, cache, cameraRef.current);
   }, [ensureVisibleCanvasSizes]);
   drawCachedBaseRef.current = drawCachedBase;
@@ -581,6 +613,9 @@ export function TerritoryMap({
     if (!canvas || typeof Path2D === "undefined") return;
     ensureVisibleCanvasSizes();
     drawMapOverlay({
+      prefectureBoundariesCached:
+        staticPrefectureBoundaries !== null &&
+        sceneCacheRef.current?.prefectureBoundaries === staticPrefectureBoundaries,
       canvas,
       camera: cameraRef.current,
       layer,
@@ -599,6 +634,7 @@ export function TerritoryMap({
     layer,
     municipalityHoverBoundaries,
     prefectureOverlayBoundaries,
+    staticPrefectureBoundaries,
     renderedFeatures,
     selected,
   ]);
@@ -640,6 +676,7 @@ export function TerritoryMap({
       const visiblePixelWidth = Math.round(Math.max(1, canvas.clientWidth) * ratio);
       const visiblePixelHeight = Math.round(Math.max(1, canvas.clientHeight) * ratio);
       return (
+        cache.prefectureBoundaries === staticPrefectureBoundaries &&
         cache.sceneGeneration === sceneGeneration &&
         cache.resourceRevision === resourceRevisionRef.current &&
         cache.layer === layer &&
@@ -649,12 +686,22 @@ export function TerritoryMap({
         sceneCacheContainsViewport(cache, camera, visiblePixelWidth, visiblePixelHeight)
       );
     },
-    [fitMode, focusedPrefecture, layer, motifSettingsSignature, sceneGeneration],
+    [
+      fitMode,
+      focusedPrefecture,
+      layer,
+      motifSettingsSignature,
+      sceneGeneration,
+      staticPrefectureBoundaries,
+    ],
   );
 
   const renderSettled = useCallback(() => {
     const camera = cameraRef.current;
-    if (canReuseCachedScene(camera)) {
+    const cache = sceneCacheRef.current;
+    const gpuAligned =
+      !webglRendererRef.current || (cache?.camera.x === camera.x && cache.camera.y === camera.y);
+    if (canReuseCachedScene(camera) && gpuAligned) {
       drawCachedBase();
       drawOverlayRef.current();
       updateVisiblePrefectures(camera);
@@ -729,11 +776,21 @@ export function TerritoryMap({
     if (cameraFrameRef.current !== null) return;
     cameraFrameRef.current = window.requestAnimationFrame(() => {
       cameraFrameRef.current = null;
+      ensureVisibleCanvasSizes();
+      const canvas = baseCanvasRef.current;
+      const cache = sceneCacheRef.current;
+      if (
+        canvas &&
+        cache &&
+        !sceneCacheContainsViewport(cache, cameraRef.current, canvas.width, canvas.height, true)
+      ) {
+        renderVectorScene(cameraRef.current);
+      }
       drawCachedBaseRef.current();
       drawOverlayRef.current();
       prefetchCameraResources(cameraRef.current);
     });
-  }, [prefetchCameraResources]);
+  }, [prefetchCameraResources, ensureVisibleCanvasSizes, renderVectorScene]);
 
   const setCamera = useCallback(
     (camera: ViewTransform, settleDelay = CAMERA_SETTLE_MS) => {

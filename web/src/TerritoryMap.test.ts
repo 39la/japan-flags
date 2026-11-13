@@ -13,7 +13,21 @@ const cache = {
 
 describe("sceneCacheContainsViewport", () => {
   it("reuses a same-scale pan while it remains inside overscan", () => {
-    expect(sceneCacheContainsViewport(cache, { x: 260, y: -150, k: 4 }, 1200, 800)).toBe(true);
+    expect(sceneCacheContainsViewport(cache, { x: 200, y: -150, k: 4 }, 1200, 800)).toBe(true);
+  });
+
+  it("includes the actual letterbox in coverage checks", () => {
+    expect(sceneCacheContainsViewport(cache, { x: 260, y: 20, k: 4 }, 1200, 800)).toBe(false);
+  });
+
+  it("permits temporary scaling only while all visible pixels remain covered", () => {
+    expect(sceneCacheContainsViewport(cache, zoomCamera(cache.camera, 1.2), 1200, 800, true)).toBe(
+      true,
+    );
+    expect(sceneCacheContainsViewport(cache, zoomCamera(cache.camera, 0.5), 1200, 800, true)).toBe(
+      false,
+    );
+    expect(sceneCacheContainsViewport(cache, zoomCamera(cache.camera, 1.2), 1200, 800)).toBe(false);
   });
 
   it("invalidates at an overscan, zoom, or viewport boundary", () => {

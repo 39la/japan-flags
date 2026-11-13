@@ -1,4 +1,5 @@
 import { geoMercator, geoPath } from "d3-geo";
+import earcut from "earcut";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   collectBoundaryArcSets,
@@ -184,7 +185,81 @@ describe("createRenderedFeatureCompiler", () => {
     if (!mesh) return;
     expect(mesh.indices.length).toBeGreaterThan(0);
     expect(mesh.indices.every((index) => index < mesh.vertices.length / 2)).toBe(true);
+    expect(mesh.chunks.reduce((sum, chunk) => sum + chunk.indexCount, 0)).toBe(mesh.indices.length);
   });
+
+  it("keeps disconnected polygons in separate GPU draw ranges", () => {
+    const polygon = (x: number) => [
+      [
+        [x, 35],
+        [x, 35.1],
+        [x + 0.1, 35.1],
+        [x + 0.1, 35],
+        [x, 35],
+      ],
+    ];
+    const split = {
+      ...feature("13103"),
+      geometry: { type: "MultiPolygon", coordinates: [polygon(139), polygon(141)] },
+    } as MapFeature;
+    const mesh = buildWebGLFeatureMesh(split, geoMercator().scale(100).translate([0, 0]));
+    expect(mesh?.chunks).toHaveLength(2);
+    expect(mesh!.chunks[0].indexCount).toBe(6);
+    expect(mesh!.chunks[1].indexCount).toBe(6);
+    expect(mesh!.chunks[1].bounds[0][0]).toBeGreaterThan(mesh!.chunks[0].bounds[1][0]);
+  });
+
+  it("component ranges preserve original triangle order and winding", () => {
+    const ring = Array.from({ length: 1024 }, (_, i) => {
+      const angle = (i * 2 * Math.PI) / 1024;
+      return [139 + 3 * Math.cos(angle), 35 + 3 * Math.sin(angle)];
+    });
+    const projection = geoMercator().scale(1000).translate([0, 0]);
+    const flat = ring.flatMap(([x, y]) => projection([x, y])!);
+    const shape = {
+      ...feature("13103"),
+      geometry: { type: "Polygon", coordinates: [[...ring, ring[0]]] },
+    } as MapFeature;
+    const mesh = buildWebGLFeatureMesh(shape, projection)!;
+    expect(mesh.vertices).toEqual(new Float32Array(flat));
+    expect(mesh.indices).toEqual(new Uint32Array(earcut(flat, [], 2)));
+    expect(mesh.chunks).toHaveLength(1);
+  });
+
+  it("bounds complete triangles in large meshes without argument expansion", () => {
+    const ring = Array.from({ length: 65_536 }, (_, i) => {
+      const angle = (i * 2 * Math.PI) / 65_536;
+      return [139 + 0.2 * Math.cos(angle), 35 + 0.2 * Math.sin(angle)];
+    });
+    ring.push(ring[0]);
+    const large = {
+      ...feature("13103"),
+      geometry: { type: "Polygon", coordinates: [ring] },
+    } as MapFeature;
+    const mesh = buildWebGLFeatureMesh(large, geoMercator().scale(100).translate([0, 0]));
+    expect(mesh).not.toBeNull();
+    expect(mesh!.chunks).toHaveLength(1);
+    let offset = 0;
+    for (const chunk of mesh!.chunks) {
+      expect(chunk.indexCount).toBeGreaterThan(0);
+      expect(chunk.indexCount % 3).toBe(0);
+      for (let i = offset; i < offset + chunk.indexCount; i += 1) {
+        const vertex = mesh!.indices[i];
+        const x = mesh!.vertices[vertex * 2];
+        const y = mesh!.vertices[vertex * 2 + 1];
+        if (
+          x < chunk.bounds[0][0] - 0.0001 ||
+          x > chunk.bounds[1][0] + 0.0001 ||
+          y < chunk.bounds[0][1] - 0.0001 ||
+          y > chunk.bounds[1][1] + 0.0001
+        ) {
+          throw new Error(`Vertex ${vertex} is outside its triangle chunk`);
+        }
+      }
+      offset += chunk.indexCount;
+    }
+    expect(offset).toBe(mesh!.indices.length);
+  }, 20_000);
 });
 
 describe("shared TopoJSON arcs", () => {
@@ -278,7 +353,7 @@ describe("shared TopoJSON arcs", () => {
     expect(store.projectedArcCount()).toBe(3);
     expect(renderedBoundary.pointCount).toBe(7);
     expect(renderedFeature.canvasPath).toBe(pathInstances[0]);
-    expect(renderedBoundary.canvasPaths[0]).toBe(pathInstances[1]);
+    expect(renderedBoundary.chunks[0].canvasPath).toBe(pathInstances[1]);
     const featureCoordinates = pathInstances[0].commands
       .filter(([command]) => command !== "closePath")
       .map(([, x, y]) => [x, y]);
@@ -329,6 +404,97 @@ describe("shared TopoJSON arcs", () => {
 
     expect(commands.filter(([command]) => command === "moveTo")).toHaveLength(2);
     expect(renderedBoundary.pointCount).toBe(4);
+  });
+
+  it("keeps every segment and local bounds when a long arc crosses chunk boundaries", () => {
+    class FakePath2D {
+      commands: Array<[string, number, number]> = [];
+      moveTo(x: number, y: number) {
+        this.commands.push(["M", x, y]);
+      }
+      lineTo(x: number, y: number) {
+        this.commands.push(["L", x, y]);
+      }
+    }
+    vi.stubGlobal("Path2D", FakePath2D);
+    const points: Array<[number, number]> = Array.from({ length: 8194 }, (_, index) => [
+      139 + index * 0.00001,
+      35,
+    ]);
+    const source: MapArcSource = { key: "long-arc", arcs: [points] };
+    const projection = geoMercator().scale(100).translate([0, 0]);
+    const compiler = createRenderedBoundaryCompiler(
+      { key: "long-arc:13", prefectureCode: "13", source, arcIndexes: [0] },
+      projection,
+    );
+    let result = compiler.next();
+    while (!result) result = compiler.next();
+    expect(compiler.next()).toBe(result);
+    expect(result.chunks).toHaveLength(3);
+    expect(result.chunks.reduce((sum, chunk) => sum + chunk.vertexCount, 0)).toBe(
+      (points.length - 1) * 2,
+    );
+    expect(result.webglLines).toHaveLength((points.length - 1) * 4);
+    const paths = result.chunks.map((chunk) => chunk.canvasPath as unknown as FakePath2D);
+    expect(
+      paths.flatMap((path) => path.commands).filter(([command]) => command === "L"),
+    ).toHaveLength(points.length - 1);
+    expect(paths[1].commands[0]).toEqual(["M", ...projection(points[4095])!]);
+    expect(paths[1].commands[1]).toEqual(["L", ...projection(points[4096])!]);
+    for (let index = 0; index < result.chunks.length; index++) {
+      const bounds = result.chunks[index].bounds;
+      for (const [, x, y] of paths[index].commands) {
+        expect(x).toBeGreaterThanOrEqual(bounds[0][0]);
+        expect(x).toBeLessThanOrEqual(bounds[1][0]);
+        expect(y).toBeGreaterThanOrEqual(bounds[0][1]);
+        expect(y).toBeLessThanOrEqual(bounds[1][1]);
+      }
+    }
+    expect(result.chunks[1].bounds[0][0]).toBeGreaterThan(result.bounds[0][0]);
+  });
+
+  it("retains GPU chunks without Path2D and accepts reversed arc references", () => {
+    vi.stubGlobal("Path2D", undefined);
+    const source: MapArcSource = {
+      key: "gpu-only",
+      arcs: [
+        [
+          [139, 35],
+          [140, 35],
+          [140, 36],
+        ],
+      ],
+    };
+    const projection = geoMercator().scale(100).translate([0, 0]);
+    const compiler = createRenderedBoundaryCompiler(
+      { key: "gpu-only:13", prefectureCode: "13", source, arcIndexes: [~0] },
+      projection,
+    );
+    let result = compiler.next();
+    while (!result) result = compiler.next();
+    const points = source.arcs[0].map((point) => projection(point)!);
+    expect(result.webglLines).toEqual(
+      new Float32Array([...points[0], ...points[1], ...points[1], ...points[2]]),
+    );
+    expect(result.chunks[0].canvasPath).toBeNull();
+    expect(result.chunks[0].vertexCount).toBe(4);
+  });
+
+  it("returns finite empty bounds when arcs contain no points", () => {
+    const source: MapArcSource = { key: "empty", arcs: [[]] };
+    const projection = geoMercator().scale(100).translate([0, 0]);
+    for (const arcIndexes of [[], [0]]) {
+      const result = createRenderedBoundaryCompiler(
+        { key: "empty:13", prefectureCode: "13", source, arcIndexes },
+        projection,
+      ).next();
+      expect(result?.chunks).toEqual([]);
+      expect(result?.webglLines).toHaveLength(0);
+      expect(result?.bounds).toEqual([
+        [0, 0],
+        [0, 0],
+      ]);
+    }
   });
 
   it("omits municipality-internal shared arcs from prefecture boundaries", () => {
@@ -397,7 +563,7 @@ describe("shared TopoJSON arcs", () => {
           source,
           arcIndexes: [],
         },
-        canvasPaths: [],
+        chunks: [],
         bounds: [
           [0, 0],
           [1, 1],

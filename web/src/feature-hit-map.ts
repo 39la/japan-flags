@@ -1,3 +1,4 @@
+import { yieldToBrowser } from "./browser-scheduling";
 import type { RenderedFeature } from "./map-geometry";
 import { MAP_HEIGHT, MAP_WIDTH } from "./map-model";
 import type { MapFeature } from "./types";
@@ -28,18 +29,6 @@ function createHitMapCanvas() {
   if (!context) return null;
   context.setTransform(HIT_MAP_SCALE, 0, 0, HIT_MAP_SCALE, 0, 0);
   return { canvas, context };
-}
-
-function yieldToBrowser() {
-  const scheduler = (
-    window as Window & {
-      scheduler?: { yield?: () => Promise<void> };
-    }
-  ).scheduler;
-  if (scheduler?.yield) return scheduler.yield();
-  return new Promise<void>((resolve) => {
-    window.requestAnimationFrame(() => resolve());
-  });
 }
 
 export function buildFeatureHitMap(items: RenderedFeature[]): FeatureHitMap | null {

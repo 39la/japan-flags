@@ -25,6 +25,7 @@ import {
 import type { FlagFitMode, MapDisplayOptions, MapFeature, MapLayer, ViewTransform } from "./types";
 
 export type SceneCache = {
+  prefectureBoundaries: RenderedBoundary[] | null;
   canvas: HTMLCanvasElement;
   camera: ViewTransform;
   marginX: number;
@@ -49,6 +50,7 @@ export function createSceneCache(
 ): SceneCache {
   return {
     canvas: document.createElement("canvas"),
+    prefectureBoundaries: null,
     camera: { ...nationalView },
     marginX: 0,
     marginY: 0,
@@ -268,6 +270,29 @@ export function drawRenderPlanFeatures(
   }
 }
 
+function strokeVisibleBoundaries(
+  context: CanvasRenderingContext2D,
+  boundaries: RenderedBoundary[],
+  camera: ViewTransform,
+  marginX: number,
+  marginY: number,
+) {
+  const strokeMargin = camera.k * (context.lineWidth / 2 + 1 / Math.abs(context.getTransform().a));
+  for (const boundary of boundaries) {
+    if (!isVisible(boundary.bounds, camera, marginX + strokeMargin, marginY + strokeMargin)) {
+      continue;
+    }
+    for (const chunk of boundary.chunks) {
+      if (
+        chunk.canvasPath &&
+        isVisible(chunk.bounds, camera, marginX + strokeMargin, marginY + strokeMargin)
+      ) {
+        context.stroke(chunk.canvasPath);
+      }
+    }
+  }
+}
+
 export function drawSceneBoundaries(
   context: CanvasRenderingContext2D,
   boundaries: RenderedBoundary[],
@@ -277,11 +302,7 @@ export function drawSceneBoundaries(
 ) {
   context.strokeStyle = "#aeb6bc";
   context.lineWidth = 0.62 / camera.k;
-  for (const boundary of boundaries) {
-    if (boundary.canvasPaths.length && isVisible(boundary.bounds, camera, marginX, marginY)) {
-      for (const path of boundary.canvasPaths) context.stroke(path);
-    }
-  }
+  strokeVisibleBoundaries(context, boundaries, camera, marginX, marginY);
 }
 
 function strokeBoundaryLayer(
@@ -295,13 +316,37 @@ function strokeBoundaryLayer(
   context.lineWidth = lineWidth / camera.k;
   context.lineJoin = "round";
   context.lineCap = "round";
-  for (const boundary of boundaries) {
-    if (!boundary.canvasPaths.length || !isVisible(boundary.bounds, camera)) continue;
-    for (const path of boundary.canvasPaths) context.stroke(path);
-  }
+  const viewport = fitCanvasViewport(
+    context.canvas.width,
+    context.canvas.height,
+    MAP_WIDTH,
+    MAP_HEIGHT,
+  );
+  strokeVisibleBoundaries(
+    context,
+    boundaries,
+    camera,
+    viewport.offsetX / viewport.scale,
+    viewport.offsetY / viewport.scale,
+  );
+}
+
+export function drawPrefectureBoundaries(
+  context: CanvasRenderingContext2D,
+  boundaries: RenderedBoundary[],
+  camera: ViewTransform,
+  marginX: number,
+  marginY: number,
+) {
+  context.strokeStyle = "#6f7980";
+  context.lineWidth = 1.18 / camera.k;
+  context.lineJoin = "round";
+  context.lineCap = "round";
+  strokeVisibleBoundaries(context, boundaries, camera, marginX, marginY);
 }
 
 type OverlayOptions = {
+  prefectureBoundariesCached?: boolean;
   canvas: HTMLCanvasElement;
   camera: ViewTransform;
   layer: MapLayer;
@@ -314,6 +359,7 @@ type OverlayOptions = {
 };
 
 export function drawMapOverlay({
+  prefectureBoundariesCached = false,
   canvas,
   camera,
   layer,
@@ -334,8 +380,18 @@ export function drawMapOverlay({
   context.translate(camera.x, camera.y);
   context.scale(camera.k, camera.k);
 
-  if (layer === "municipality" && displayOptions.showPrefectureBoundaries) {
-    strokeBoundaryLayer(context, prefectureBoundaries, camera, "#6f7980", 1.18);
+  if (
+    layer === "municipality" &&
+    displayOptions.showPrefectureBoundaries &&
+    !prefectureBoundariesCached
+  ) {
+    drawPrefectureBoundaries(
+      context,
+      prefectureBoundaries,
+      camera,
+      viewport.offsetX / viewport.scale,
+      viewport.offsetY / viewport.scale,
+    );
   }
   if (
     layer === "prefecture" &&
@@ -345,6 +401,8 @@ export function drawMapOverlay({
     strokeBoundaryLayer(context, municipalityBoundaries, camera, "#68737a", 0.72);
   }
 
+  context.lineJoin = "round";
+  context.lineCap = "round";
   const selectedKey = selected ? featureKey(selected) : null;
   const hoveredKey = hovered ? featureKey(hovered) : null;
   const selectedIsPrefecture = selected?.properties.entityType === "prefecture";
